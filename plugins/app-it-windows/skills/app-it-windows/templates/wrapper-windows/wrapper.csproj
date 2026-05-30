@@ -1,0 +1,64 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Windows host (`wrapper-windows`) — the WebView2 sibling of
+       plugins/app-it/skills/app-it/templates/wrapper.swift. Compiles to a
+       self-contained single-file .exe that owns the window, taskbar identity,
+       and .ico, and creates the Job Object the dev server runs inside.
+       Build: dotnet publish -c Release -r win-x64 (self-contained single-file)
+       (driven by desktop-build.ps1 in step 2.3). -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms is pulled in ONLY for the tray icon (System.Windows.Forms
+         NotifyIcon) and System.Drawing.Icon loading. WPF has no first-class
+         tray primitive; NotifyIcon is the standard, dependency-free way to get
+         one without taking on a third-party tray NuGet. -->
+    <UseWindowsForms>true</UseWindowsForms>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>AppItWindows</RootNamespace>
+    <!-- Published as app-it-host.exe; desktop-build.ps1 copies it to
+         desktop\<App Name>\<App Name>.exe. Taskbar identity comes from the
+         window + .ico, not the file name (see README.md). -->
+    <AssemblyName>app-it-host</AssemblyName>
+    <Version>0.1.0</Version>
+
+    <!-- Self-contained single-file: one .exe, no .NET install on the target.
+         The Windows reading of app-it's "click → it works" (ADR 0005). -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- WebView2's native loader can't live inside the packed single file;
+         this extracts it alongside at first run. Required or the host throws
+         "WebView2Loader.dll not found" on launch. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+
+    <!-- Per-monitor-v2 DPI awareness so WebView2 renders crisply on mixed-DPI
+         setups. The MANIFEST builds from a Mac; whether the result actually
+         looks right at each DPI is deferred to a Windows maintainer (ADR 0005). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms adds System.Windows.Forms and System.Drawing as implicit
+         global usings, which collide with WPF's System.Windows (e.g. Application,
+         MessageBox resolve ambiguously — CS0104). This host is WPF-first and
+         touches WinForms only for the tray NotifyIcon, always through the
+         explicit `Forms.` / `Drawing.` aliases in MainWindow.xaml.cs — so drop
+         the two implicit globals and keep the WPF names unambiguous. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Evergreen Chromium runtime binding. Pinned for a reproducible CI build;
+         a maintainer can bump it freely — the API surface used here is stable. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+  </ItemGroup>
+
+</Project>

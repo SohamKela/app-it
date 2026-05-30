@@ -1,0 +1,43 @@
+{
+  "name": "app-it-windows",
+  "version": "0.1.0",
+  "description": "Turn local web projects into Windows Start Menu launchable .exe apps. Beta · scaffolded · untested on real hardware · maintainer wanted.",
+  "author": {
+    "name": "Christian Katzmann",
+    "url": "https://github.com/Christian-Katzmann"
+  },
+  "homepage": "https://github.com/Christian-Katzmann/app-it/blob/main/docs/WINDOWS.md",
+  "repository": "https://github.com/Christian-Katzmann/app-it",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "skills",
+    "windows",
+    "start-menu",
+    "taskbar",
+    "webview2",
+    "wpf",
+    "local-dev",
+    "beta"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "App It (Windows beta)",
+    "shortDescription": "Make local web projects launchable from the Windows Start Menu (beta, maintainer wanted).",
+    "longDescription": "App It (Windows beta) turns a local web project into a repeatable Windows launcher with a native WPF + WebView2 window, its own Taskbar identity, multi-resolution .ico, and a Start Menu shortcut. Scaffolded but not yet dogfooded on real Windows hardware — the author runs macOS only. See docs/WINDOWS.md; a Windows maintainer is wanted.",
+    "developerName": "Christian Katzmann",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Local"
+    ],
+    "defaultPrompt": [
+      "Use app-it-windows to make this project launchable from the Windows Start Menu.",
+      "Give this local app a Windows .exe launcher with its own icon and Taskbar entry.",
+      "Scaffold a Windows desktop launcher for this project (beta)."
+    ],
+    "brandColor": "#2F6FED"
+  }
+}

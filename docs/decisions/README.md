@@ -6,6 +6,7 @@ Why app-it is shaped the way it is — and which tempting alternatives were trie
 - [0002](0002-macos-only-scope.md) — macOS only, on purpose
 - [0003](0003-bundle-id-prefix.md) — `com.user.<slug>` bundle-id prefix
 - [0004](0004-daemon-mode-lifecycle.md) — Daemon-mode dev server: warm on close, killed on quit
+- [0005](0005-windows-beta-scope.md) — Windows beta: scope and lifecycle contract (supersedes 0002 for the Windows lane only)
 
 `REJECTED/` holds proposals considered seriously and declined, so they don't get re-litigated six months from now:
 

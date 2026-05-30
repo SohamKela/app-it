@@ -1,0 +1,11 @@
+<Application x:Class="AppItWindows.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <!-- ShutdownMode=OnExplicitShutdown is load-bearing: it is piece 1 of the
+         soft-close-vs-quit triple (ADR 0005). Without it, closing the window
+         would terminate the process and kill the warm dev server. There is no
+         StartupUri — App.xaml.cs bootstraps the window by hand so it can parse
+         args and enforce single-instance before anything is shown. -->
+    <Application.Resources />
+</Application>
