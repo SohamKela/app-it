@@ -1,6 +1,6 @@
 # 0002 — macOS only, on purpose
 
-**Status:** Accepted
+**Status:** Accepted · superseded **for the Windows lane only** by [0005](0005-windows-beta-scope.md) (which keeps this ADR's core call — Windows is a *separate plugin*, not a flag).
 
 ## Context
 
