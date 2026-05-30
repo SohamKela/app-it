@@ -4,7 +4,7 @@
        plugins/app-it/skills/app-it/templates/wrapper.swift. Compiles to a
        self-contained single-file .exe that owns the window, taskbar identity,
        and .ico, and creates the Job Object the dev server runs inside.
-       Build: dotnet publish -c Release -r win-x64 --self-contained
+       Build: dotnet publish -c Release -r win-x64 (self-contained single-file)
        (driven by desktop-build.ps1 in step 2.3). -->
 
   <PropertyGroup>
