@@ -1,0 +1,42 @@
+{
+  "_comment": "Single source of truth for desktop-build.ps1 and desktop-quit.ps1. Copy this file to scripts\\app-it.config.json and customize. Mirrors the macOS app-it.config.example.json schema exactly — the same fields work on both platforms. The optional platform.windows block carries Windows-only specifics without polluting the shared schema.",
+  "_fields": {
+    "name": "Display name. Non-ASCII OK (e.g. 'Momó Studio'). The build script uses this as the .exe name, the desktop\\ folder name, and the Start Menu shortcut label.",
+    "slug": "File-safe slug. Lowercase, hyphens. Used for assets\\<slug>-icon.{png,svg} and to namespace runtime/log paths under %LOCALAPPDATA%\\app-it\\<slug>\\.",
+    "port": "Preferred port. The launcher tries this first; if busy, scans [port..port+50] for a free port. Records actual runtime port to %LOCALAPPDATA%\\app-it\\<slug>\\server.port.",
+    "start_command": "Command to start the dev server, run from PROJECT_ROOT. Must honor PORT env var. Vite needs --port via CLI: 'npm run dev -- --port $PORT'. Avoid hardcoded -p literals.",
+    "bundle_id": "Reverse-DNS bundle identifier. Retained as a stable per-app key even though Windows has no LaunchServices — it namespaces state/log paths under %LOCALAPPDATA%\\app-it\\<slug>\\ the same way it does on macOS.",
+    "version": "Marketing version. Doesn't matter for unsigned use; pick anything semver-shaped.",
+    "polyfill_path": "Optional absolute path to a JS polyfill file (FSA shim). Use @ROOT@ to reference the repo root: '@ROOT@\\assets\\<slug>-polyfill.js'. Empty string when no polyfill is needed.",
+    "backend_port": "Optional. Set for multi-server cohabiting apps. The backend service's preferred port. The launcher allocates a free port starting here for the backend, exports it as API_PORT to both processes.",
+    "backend_start_command": "Optional. The command to start the backend service. Must honor API_PORT env var.",
+    "platform.windows": {
+      "_comment": "Optional block. Every field has a sensible default — a macOS config opened on Windows works without it.",
+      "webview2_user_data_dir": "Where WebView2 stores its profile (cookies, cache, local storage). Supports %LOCALAPPDATA% and %APPDATA% expansions. Default: %LOCALAPPDATA%\\app-it\\<slug>\\WebView2",
+      "ico_sizes": "Pixel sizes to include in the multi-resolution .ico. Default [16,32,48,64,128,256]. Rationale for defaults: 16/32/48 cover legacy taskbar and DPI contexts; 64/128 add mid-DPI taskbar and Start Menu rendering for nearly free; 256 covers high-DPI and Explorer thumbnails.",
+      "start_menu_folder": "Name of the folder under Start Menu\\Programs that holds the .lnk shortcut. Default: 'app-it'. Mirrors macOS '~/Applications/App It/' as the grouping point for all app-it launchers.",
+      "edge_fallback": "Set to true to force the Edge --app= launcher for this app even when the .NET SDK and WebView2 are available. Default: false. The build script auto-selects this when dotnet publish fails."
+    }
+  },
+  "apps": [
+    {
+      "name": "My App",
+      "slug": "my-app",
+      "port": 3000,
+      "start_command": "pnpm exec next dev",
+      "bundle_id": "com.user.my-app",
+      "version": "0.1.0",
+      "polyfill_path": "",
+      "backend_port": null,
+      "backend_start_command": null,
+      "platform": {
+        "windows": {
+          "webview2_user_data_dir": "%LOCALAPPDATA%\\app-it\\my-app\\WebView2",
+          "ico_sizes": [16, 32, 48, 64, 128, 256],
+          "start_menu_folder": "app-it",
+          "edge_fallback": false
+        }
+      }
+    }
+  ]
+}
