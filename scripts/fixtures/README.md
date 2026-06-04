@@ -32,6 +32,7 @@ For each fixture, `test-fixtures.sh`:
 | Fixture | Distinct regression it guards |
 |---|---|
 | `vite-basic` | Vite detection; single-server build → launch → port → ownership → warm reattach → teardown; PNG → `.icns` icon round-trip |
+| `fixed-port` | `port_mode: "fixed"` uses the exact preferred origin, refuses busy-port fallback with a clear launcher report, and labels foreign preferred-port listeners without touching them |
 | `next-basic` | Next detection (PORT-env, no `--port`); bundle assembles for a Next shape |
 | `static-export` | app-it-static: static-export detection + serving a prebuilt `out/` with the real stdlib `static-server.py` |
 | `vite-express` | A3.2 multiserver template selected; dual-port + `API_PORT`; both ports owned and freed |

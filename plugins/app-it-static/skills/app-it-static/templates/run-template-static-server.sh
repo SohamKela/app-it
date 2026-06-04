@@ -38,9 +38,44 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/server.log"
 PID_FILE="$STATE_DIR/server.pid"
 PORT_FILE="$STATE_DIR/server.port"
+PID_ID_FILE="$STATE_DIR/server.identity"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="$(command -v python3 || echo /usr/bin/python3)"
+
+# --- Ownership identity (defeats PID reuse) ----------------------------
+# Record the server's start-time so cleanup (desktop-quit.sh) can prove a
+# recorded PID is still OUR server and not a recycled PID the OS handed to
+# something unrelated. Same discipline as app-it's run-template.sh.
+pid_identity() {
+    local pid="${1:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}'
+}
+
+write_pid_identity() {
+    local pid="$1"
+    local file="$2"
+    local identity
+    identity="$(pid_identity "$pid" || true)"
+    if [ -n "$identity" ]; then
+        printf '%s\n' "$identity" > "$file"
+    else
+        rm -f "$file"
+    fi
+}
+
+pid_identity_state_valid() {
+    local pid="$1"
+    local file="$2"
+    local recorded current
+    [ -f "$file" ] || return 0  # legacy generated state; reattach still needs listener proof below.
+    recorded="$(sed -n '1p' "$file" 2>/dev/null || true)"
+    current="$(pid_identity "$pid" || true)"
+    [ -n "$recorded" ] && [ "$recorded" = "$current" ]
+}
 
 # --- Built-output + python sanity --------------------------------------
 if [ ! -d "$STATIC_PATH" ]; then
@@ -57,10 +92,13 @@ if [ ! -x "$PYTHON" ] && ! command -v python3 >/dev/null 2>&1; then
 fi
 
 # --- Stale-state cleanup ----------------------------------------------
+# A dead recorded PID, or a live PID whose start-time no longer matches the
+# recorded identity (PID reuse), is stale state — scrap it and start fresh.
 if [ -f "$PID_FILE" ]; then
     EXPECTED_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null; then
-        rm -f "$PID_FILE" "$PORT_FILE"
+    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null \
+        || ! pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
@@ -73,7 +111,7 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     EXPECTED_PID="$(cat "$PID_FILE")"
     EXPECTED_PORT="$(cat "$PORT_FILE")"
     REATTACH_OK=0
-    if kill -0 "$EXPECTED_PID" 2>/dev/null; then
+    if kill -0 "$EXPECTED_PID" 2>/dev/null && pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
         LISTENERS="$(lsof -ti tcp:"$EXPECTED_PORT" 2>/dev/null || true)"
         if [ -n "$LISTENERS" ]; then
             DESCENDANTS="$EXPECTED_PID"
@@ -107,7 +145,7 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     if [ "$REATTACH_OK" = "1" ]; then
         CHOSEN_PORT="$EXPECTED_PORT"
     else
-        rm -f "$PID_FILE" "$PORT_FILE"
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
@@ -134,6 +172,7 @@ if [ -z "$CHOSEN_PORT" ]; then
     SERVER_PID=$!
     echo "$SERVER_PID" > "$PID_FILE"
     echo "$CHOSEN_PORT" > "$PORT_FILE"
+    write_pid_identity "$SERVER_PID" "$PID_ID_FILE"
     disown "$SERVER_PID" 2>/dev/null || true
 
     URL="http://localhost:$CHOSEN_PORT"
@@ -150,7 +189,7 @@ if [ -z "$CHOSEN_PORT" ]; then
     done
     if [ "$READY" != "1" ]; then
         TAIL="$(tail -20 "$SERVER_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 600)"
-        rm -f "$PID_FILE" "$PORT_FILE"
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
         /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"The static server did not respond on $URL.\n\nLast log lines:\n$TAIL\""
         exit 1
     fi

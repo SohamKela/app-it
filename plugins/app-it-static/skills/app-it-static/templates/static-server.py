@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-# Tiny zero-dependency static file server for app-it-static.
-#
-# Serves a *finished* build directory (dist/ build/ out/ ...) over
-# http://127.0.0.1:PORT with single-page-app fallback, so a finished app runs
-# with ~15 MB of RAM instead of the 300-700 MB a dev server (bundler +
-# file-watcher + transpiler held in memory) costs. This is the static analog of
-# wrapper.swift: small, shipped, no install — Python 3 is already required by
-# this toolchain (Xcode CLT ships it; the build scripts shell /usr/bin/python3).
-#
-# WHY NOT `python3 -m http.server`:
-#   - It has no SPA history fallback: deep links into a client-side router
-#     (React Router, Vue Router, SvelteKit) 404 because nothing rewrites unknown
-#     routes to index.html.
-#   - Its MIME guesses are stale on some systems (.mjs/.wasm served as
-#     octet-stream → the browser refuses the module/wasm). We pin the few that
-#     matter.
+# Tiny zero-dependency static server for finished builds.
+# Keeps app-it-static lightweight by serving dist/build/out from
+# http://127.0.0.1:PORT with SPA fallback and strict browser MIME types.
+# Do not replace with `python3 -m http.server`: it breaks deep links and can
+# serve .mjs/.wasm with stale content types on older systems.
 #
 # Usage:
 #   STATIC_DIR=/abs/path/to/dist PORT=4100 ./static-server.py
@@ -27,8 +16,7 @@ import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-# Pin the content types that browsers are strict about and older mimetypes DBs
-# get wrong. Everything else falls through to the stdlib guesser.
+# Pin strict browser types; everything else uses the stdlib guesser.
 EXTRA_TYPES = {
     ".js":          "text/javascript",
     ".mjs":         "text/javascript",
@@ -47,15 +35,8 @@ class StaticHandler(SimpleHTTPRequestHandler):
         return EXTRA_TYPES.get(ext.lower()) or super().guess_type(path)
 
     def send_head(self):
-        # SPA history fallback, the standard (connect-history-api-fallback) way:
-        # if the path maps to no real file or directory AND it's a page navigation
-        # (the browser sent `Accept: text/html`), serve index.html so the
-        # client-side router can take over. Asset requests — scripts, fetch,
-        # images — don't ask for text/html, so a genuinely missing asset still
-        # 404s and a broken build isn't masked as the home page. Keying on Accept
-        # (not a filename-extension guess) is what lets a route whose last segment
-        # contains a dot, e.g. /report/2024.q1, fall back correctly while
-        # /assets/missing.js still 404s. translate_path() blocks "../" escapes.
+        # SPA fallback only for page navigations; missing assets must still 404.
+        # `Accept: text/html` also handles dotted routes like /report/2024.q1.
         path = self.translate_path(self.path)
         if not os.path.exists(path) and "text/html" in self.headers.get("Accept", ""):
             self.path = "/index.html"

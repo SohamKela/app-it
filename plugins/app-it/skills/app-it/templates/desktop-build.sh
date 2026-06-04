@@ -1,14 +1,7 @@
 #!/bin/bash
-# Builds desktop/<AppName>.app bundle(s) for every entry in scripts/app-it.config.json
-# (or, for backward compat, a bash APPS=(...) array below). Idempotent.
-#
-# This file is a TEMPLATE. The agent customizes app-it.config.json (preferred)
-# and chooses the launcher mode (swift|chrome) by editing the file or setting
-# APP_IT_LAUNCHER_MODE in the environment.
-#
-# Worktree-aware: ROOT honors APP_IT_PROJECT_ROOT env (build from worktree,
-# bake the canonical persistent path). Without it, ROOT is derived from
-# this script's location (the repo it was copied into).
+# Builds desktop/<AppName>.app for scripts/app-it.config.json entries.
+# APP_IT_PROJECT_ROOT can bake a canonical repo path while running from a worktree.
+# APP_IT_LAUNCHER_MODE chooses swift|chrome.
 #
 # app-it.config.json shape:
 # {
@@ -17,6 +10,7 @@
 #       "name": "Momó Studio",
 #       "slug": "momo-studio",
 #       "port": 5173,
+#       "port_mode": "fallback",             // optional: fallback|fixed
 #       "start_command": "npm run dev -- --port $PORT",
 #       "bundle_id": "com.user.momo-studio",
 #       "version": "0.1.0",
@@ -31,9 +25,7 @@
 
 set -euo pipefail
 
-# Worktree workflow: APP_IT_PROJECT_ROOT overrides the auto-derived path.
-# Helper scripts (icons, install, quit) live next to this script — those
-# stay relative to $0. Only PROJECT_ROOT-baked-into-runtime is overridden.
+# Helpers stay next to this script; only the runtime project root is overridden.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${APP_IT_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export APP_IT_PROJECT_ROOT="$ROOT"
@@ -43,8 +35,7 @@ CONFIG_FILE="$SCRIPT_DIR/app-it.config.json"
 # --- Load apps from JSON (preferred) or bash APPS array (backward compat) ----
 APPS=()
 if [ -f "$CONFIG_FILE" ]; then
-    # Convert each app to pipe-delimited internal record.
-    # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
+    # Internal record: name|slug|port|port_mode|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
     while IFS= read -r line; do
         [ -n "$line" ] && APPS+=("$line")
     done < <(/usr/bin/python3 - "$CONFIG_FILE" <<'PY'
@@ -52,10 +43,15 @@ import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
 for a in cfg.get("apps", []):
+    port_mode = a.get("port_mode", "fallback")
+    if port_mode not in ("fallback", "fixed"):
+        print(f"ERROR: app {a.get('slug') or a.get('name') or '<unnamed>'} has invalid port_mode {port_mode!r}; expected 'fallback' or 'fixed'", file=sys.stderr)
+        sys.exit(1)
     fields = [
         a.get("name", ""),
         a.get("slug", ""),
         str(a.get("port", "")),
+        port_mode,
         a.get("start_command", ""),
         a.get("bundle_id", ""),
         a.get("version", "0.1.0"),
@@ -75,8 +71,8 @@ else
     echo "      Recommended: copy templates/app-it.config.example.json to scripts/." >&2
     APPS=(
       # Replace these with your apps. One line per app.
-      # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
-      "__APP_NAME__|__APP_SLUG__|__PORT__|__START_COMMAND__|__BUNDLE_ID__|__VERSION__|__POLYFILL_PATH_ENTRY__||"
+      # Format: name|slug|port|port_mode|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
+      "__APP_NAME__|__APP_SLUG__|__PORT__|fallback|__START_COMMAND__|__BUNDLE_ID__|__VERSION__|__POLYFILL_PATH_ENTRY__||"
     )
 fi
 
@@ -86,14 +82,11 @@ if [ "${#APPS[@]}" -eq 0 ]; then
 fi
 
 # --- Bundle-ID validation -----------------------------------------------
-# Reject com.$(id -un).* — LaunchServices treats this as a personal-team
-# developer prefix and may refuse unsigned bundles claiming that team
-# identity with `_LSOpenURLs… error -600 / procNotFound`. The failure
-# is non-deterministic across macOS versions and iCloud xattr state,
-# so the safest answer is to never use the prefix at all.
+# Reject com.$(id -un).*; LaunchServices can treat it as a personal-team prefix
+# and refuse local bundles with `_LSOpenURLs... error -600 / procNotFound`.
 USER_PREFIX="com.$(id -un | tr 'A-Z' 'a-z')."
 for entry in "${APPS[@]}"; do
-    IFS='|' read -r _ _ _ _ BID _ _ _ _ <<<"$entry"
+    IFS='|' read -r _ _ _ _ _ BID _ _ _ _ <<<"$entry"
     BID_LOWER="$(echo "$BID" | tr 'A-Z' 'a-z')"
     case "$BID_LOWER" in
         "$USER_PREFIX"*)
@@ -113,6 +106,8 @@ fi
 PLIST_TEMPLATE="$SCRIPT_DIR/info-plist-template.xml"
 WRAPPER_SRC="$SCRIPT_DIR/wrapper.swift"
 WRAPPER_BUILD="$ROOT/assets/icons/build/wrapper"
+RUN_STUB_SRC="$SCRIPT_DIR/native-run-stub.c"
+RUN_STUB_BUILD="$ROOT/assets/icons/build/run-stub"
 
 if [ "$LAUNCHER_MODE" = "swift" ]; then
     RUN_TEMPLATE_SINGLE="$SCRIPT_DIR/run-template.sh"
@@ -129,9 +124,7 @@ if [ ! -f "$RUN_TEMPLATE_SINGLE" ] || [ ! -f "$PLIST_TEMPLATE" ]; then
 fi
 
 # --- Compile the native WebKit wrapper (cached, universal) -------------
-# Build arm64 + x86_64 by default and lipo into a universal binary, so the
-# wrapper runs on both Apple Silicon and Intel Macs. APP_IT_SWIFT_ARCHS
-# overrides ("arm64,x86_64", "arm64", "x86_64").
+# Build universal by default; APP_IT_SWIFT_ARCHS can narrow the arch list.
 if [ "$LAUNCHER_MODE" = "swift" ]; then
     if [ ! -f "$WRAPPER_SRC" ]; then
         echo "Missing wrapper source: $WRAPPER_SRC" >&2
@@ -152,7 +145,7 @@ if [ "$LAUNCHER_MODE" = "swift" ]; then
         for arch in "${ARCH_LIST[@]}"; do
             arch_clean="$(echo "$arch" | tr -d ' ')"
             BIN="$WRAPPER_BUILD.$arch_clean"
-            if swiftc -O "$WRAPPER_SRC" \
+            if swiftc "$WRAPPER_SRC" \
                 -o "$BIN" \
                 -framework Cocoa -framework WebKit \
                 -target "$arch_clean-apple-macosx11" 2>/dev/null; then
@@ -165,7 +158,7 @@ if [ "$LAUNCHER_MODE" = "swift" ]; then
         if [ "${#ARCH_BINS[@]}" -eq 0 ]; then
             # Last resort: build for host arch with no -target.
             echo "All targeted archs failed — building for host arch only." >&2
-            swiftc -O "$WRAPPER_SRC" -o "$WRAPPER_BUILD" -framework Cocoa -framework WebKit
+            swiftc "$WRAPPER_SRC" -o "$WRAPPER_BUILD" -framework Cocoa -framework WebKit
         elif [ "${#ARCH_BINS[@]}" -eq 1 ]; then
             mv "${ARCH_BINS[0]}" "$WRAPPER_BUILD"
         else
@@ -175,13 +168,53 @@ if [ "$LAUNCHER_MODE" = "swift" ]; then
     fi
 fi
 
+# --- Compile the native run stub --------------------------------------
+# CFBundleExecutable should be Mach-O. Use a tiny run -> run.sh stub when a C
+# toolchain exists; otherwise keep the older shell-as-run shape.
+RUN_STUB_AVAILABLE=0
+if [ -f "$RUN_STUB_SRC" ]; then
+    RUN_STUB_CC="${APP_IT_CC:-$(command -v cc 2>/dev/null || command -v clang 2>/dev/null || true)}"
+    if [ -n "$RUN_STUB_CC" ]; then
+        if [ ! -x "$RUN_STUB_BUILD" ] || [ "$RUN_STUB_SRC" -nt "$RUN_STUB_BUILD" ]; then
+            echo "Compiling native run stub: $RUN_STUB_BUILD"
+            mkdir -p "$(dirname "$RUN_STUB_BUILD")"
+            STUB_ARCHS="${APP_IT_STUB_ARCHS:-${APP_IT_SWIFT_ARCHS:-arm64,x86_64}}"
+            IFS=',' read -r -a STUB_ARCH_LIST <<<"$STUB_ARCHS"
+            STUB_ARCH_BINS=()
+            for arch in "${STUB_ARCH_LIST[@]}"; do
+                arch_clean="$(echo "$arch" | tr -d ' ')"
+                BIN="$RUN_STUB_BUILD.$arch_clean"
+                if "$RUN_STUB_CC" -arch "$arch_clean" -mmacosx-version-min=11.0 "$RUN_STUB_SRC" -o "$BIN" 2>/dev/null; then
+                    STUB_ARCH_BINS+=("$BIN")
+                else
+                    rm -f "$BIN"
+                fi
+            done
+            if [ "${#STUB_ARCH_BINS[@]}" -eq 0 ]; then
+                if "$RUN_STUB_CC" "$RUN_STUB_SRC" -o "$RUN_STUB_BUILD" 2>/dev/null; then
+                    RUN_STUB_AVAILABLE=1
+                else
+                    echo "WARN: native run stub failed to compile — falling back to shell CFBundleExecutable." >&2
+                    rm -f "$RUN_STUB_BUILD"
+                fi
+            elif [ "${#STUB_ARCH_BINS[@]}" -eq 1 ]; then
+                mv "${STUB_ARCH_BINS[0]}" "$RUN_STUB_BUILD"
+                RUN_STUB_AVAILABLE=1
+            else
+                lipo -create "${STUB_ARCH_BINS[@]}" -output "$RUN_STUB_BUILD"
+                rm -f "${STUB_ARCH_BINS[@]}"
+                RUN_STUB_AVAILABLE=1
+            fi
+        else
+            RUN_STUB_AVAILABLE=1
+        fi
+    else
+        echo "WARN: no C compiler found — falling back to shell CFBundleExecutable." >&2
+    fi
+fi
+
 # --- Substitution helper -----------------------------------------------
-# Strips a TEMPLATE-DOCS block before substitution so placeholder examples
-# inside header comments don't leak substituted values into the built
-# artifact. Templates may bracket their docs with:
-#     ### TEMPLATE-DOCS-START
-#     (header comments referencing __APP_NAME__ etc. for human readers)
-#     ### TEMPLATE-DOCS-END
+# Strip TEMPLATE-DOCS blocks before substituting placeholders into artifacts.
 substitute() {
     /usr/bin/python3 - "$@" <<'PY'
 import sys, pathlib, re
@@ -196,7 +229,7 @@ PY
 
 # --- Build each app -----------------------------------------------------
 for entry in "${APPS[@]}"; do
-    IFS='|' read -r APP_NAME APP_SLUG PORT START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START_COMMAND <<<"$entry"
+    IFS='|' read -r APP_NAME APP_SLUG PORT PORT_MODE START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START_COMMAND <<<"$entry"
     POLYFILL_PATH="${POLYFILL_PATH//@ROOT@/$ROOT}"
 
     APP_DIR="$ROOT/desktop/${APP_NAME}.app"
@@ -207,8 +240,7 @@ for entry in "${APPS[@]}"; do
     echo "Building: $APP_DIR"
     mkdir -p "$MACOS" "$RESOURCES"
 
-    # Pick template — multi-server if backend fields are populated and
-    # the multi-server template exists.
+    # Multi-server only when backend fields are configured and the template exists.
     if [ -n "$BACKEND_PORT" ] && [ -n "$BACKEND_START_COMMAND" ] && [ -f "$RUN_TEMPLATE_MULTI" ]; then
         SELECTED_RUN_TEMPLATE="$RUN_TEMPLATE_MULTI"
         IS_MULTI=1
@@ -223,51 +255,57 @@ for entry in "${APPS[@]}"; do
         "__VERSION__=$VERSION" \
         > "$CONTENTS/Info.plist"
 
+    RUN_SCRIPT="$MACOS/run"
+    if [ "$RUN_STUB_AVAILABLE" = "1" ]; then
+        RUN_SCRIPT="$MACOS/run.sh"
+    fi
+
     if [ "$IS_MULTI" = "1" ]; then
         substitute "$SELECTED_RUN_TEMPLATE" \
             "__APP_NAME__=$APP_NAME" \
             "__APP_SLUG__=$APP_SLUG" \
             "__PROJECT_ROOT__=$ROOT" \
             "__PORT__=$PORT" \
+            "__PORT_MODE__=$PORT_MODE" \
             "__START_COMMAND__=$START_COMMAND" \
             "__BACKEND_PORT__=$BACKEND_PORT" \
             "__BACKEND_START_COMMAND__=$BACKEND_START_COMMAND" \
             "__POLYFILL_PATH__=$POLYFILL_PATH" \
-            > "$MACOS/run"
+            > "$RUN_SCRIPT"
     else
         substitute "$SELECTED_RUN_TEMPLATE" \
             "__APP_NAME__=$APP_NAME" \
             "__APP_SLUG__=$APP_SLUG" \
             "__PROJECT_ROOT__=$ROOT" \
             "__PORT__=$PORT" \
+            "__PORT_MODE__=$PORT_MODE" \
             "__START_COMMAND__=$START_COMMAND" \
             "__POLYFILL_PATH__=$POLYFILL_PATH" \
-            > "$MACOS/run"
+            > "$RUN_SCRIPT"
     fi
-    chmod +x "$MACOS/run"
+    chmod +x "$RUN_SCRIPT"
+
+    if [ "$RUN_STUB_AVAILABLE" = "1" ]; then
+        cp "$RUN_STUB_BUILD" "$MACOS/run"
+        chmod +x "$MACOS/run"
+    else
+        rm -f "$MACOS/run.sh"
+    fi
 
     if [ "$LAUNCHER_MODE" = "swift" ]; then
         cp "$WRAPPER_BUILD" "$MACOS/wrapper"
         chmod +x "$MACOS/wrapper"
     fi
 
-    # Always invoke desktop-icons.sh — the script itself is mtime-aware
-    # and short-circuits when nothing changed. Don't gate on `if [ ! -f .icns ]`
-    # here — that gate caused users to see stale icons after replacing
-    # the source PNG.
+    # desktop-icons.sh is mtime-aware; always call it to avoid stale icons.
     APP_NAME="$APP_NAME" APP_SLUG="$APP_SLUG" "$SCRIPT_DIR/desktop-icons.sh"
 
     # Touch the bundle so Finder picks up changes (icon cache).
     touch "$APP_DIR"
 
     # --- Ad-hoc code signature ----------------------------------------
-    # macOS 15+ (Sequoia/Tahoe) Gatekeeper rejects unsigned apps when
-    # launched from Finder/Dock with "X can't be opened" — even when
-    # there's no quarantine flag. An ad-hoc (self) signature satisfies
-    # the "must be signed" check without requiring an Apple Developer
-    # ID. Strip xattrs first because synced folders can write
-    # com.apple.FinderInfo into bundle dirs, and codesign refuses with
-    # "resource fork, Finder information, or similar detritus not allowed".
+    # macOS 15+ can reject unsigned local apps from Finder/Dock. Ad-hoc signing
+    # is enough; strip xattrs first because synced folders can taint bundles.
     /usr/bin/xattr -cr "$APP_DIR" 2>/dev/null || true
     if ! /usr/bin/codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1; then
         echo "  WARN: codesign --sign - failed for $APP_DIR (app may be blocked by Gatekeeper)" >&2

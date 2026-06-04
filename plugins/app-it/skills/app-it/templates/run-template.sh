@@ -1,30 +1,11 @@
 #!/bin/bash
-# app-it launcher (Swift WebKit shell variant) — ensures the dev server is up,
-# then hands the window over to the native Swift WebKit wrapper that lives next
-# to this script. The wrapper takes over as the .app's foreground process, so
-# the .app's own Dock icon stays visible and macOS handles single-instance
-# activation natively.
+# app-it launcher: start or reattach the dev server, then exec the native
+# WebKit wrapper so the generated .app keeps its own Dock identity.
 #
-# This file is a TEMPLATE. desktop-build.sh substitutes:
-#   __APP_NAME__       human display name (e.g. "Momó Studio")
-#   __APP_SLUG__       file-safe slug (e.g. "momo-studio")
-#   __PROJECT_ROOT__   absolute path to the repo (baked at build time)
-#   __PORT__           PREFERRED port — the launcher tries this first; if it's
-#                      already in use, the launcher scans upward [PORT..PORT+50]
-#                      for a free port and uses that. Sibling appified apps
-#                      coexist without coordination.
-#   __START_COMMAND__  the command to start the dev server, run from PROJECT_ROOT.
-#                      Must honor the PORT env var. Most dev servers do
-#                      (vite, next, express, flask, CRA, …). Vite needs the
-#                      port via CLI: `npm run dev -- --port "$PORT"`. If your
-#                      command hardcodes a port literal in `package.json`
-#                      scripts (`"dev": "next dev -p 3002"`), the launcher's
-#                      chosen port will be ignored — bypass via direct binary
-#                      (`pnpm exec next dev`) or add a `dev:app-it` script.
-#   __POLYFILL_PATH__  optional absolute path to a JS polyfill file (empty if none)
-#
-# PROJECT_ROOT is baked at build time. Honors APP_IT_PROJECT_ROOT env override
-# at build time (for worktree workflows). Re-run desktop:build if the repo moves.
+# Template vars: app name/slug, baked project root, preferred port,
+# start command, port mode, optional polyfill. START_COMMAND must honor PORT;
+# hardcoded port literals bypass runtime fallback. Re-run desktop:build if the
+# repo moves.
 
 set -e
 
@@ -32,11 +13,10 @@ APP_NAME="__APP_NAME__"
 APP_SLUG="__APP_SLUG__"
 PROJECT_ROOT="__PROJECT_ROOT__"
 PREFERRED_PORT=__PORT__
+PORT_MODE="__PORT_MODE__"
 POLYFILL_PATH="__POLYFILL_PATH__"
 
-# Keep `$PORT` and other shell syntax literal until the daemon spawns below.
-# A plain double-quoted assignment here would expand `$PORT` before the
-# launcher has selected its runtime port, breaking Vite/SvelteKit recipes.
+# Keep `$PORT` literal until the launcher picks its runtime port.
 START_COMMAND="$(cat <<'APP_IT_START_COMMAND'
 __START_COMMAND__
 APP_IT_START_COMMAND
@@ -48,14 +28,23 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/server.log"
 PID_FILE="$STATE_DIR/server.pid"
 PORT_FILE="$STATE_DIR/server.port"
+PID_ID_FILE="$STATE_DIR/server.identity"
 INSTALL_LOG="$LOG_DIR/install.log"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+case "$PORT_MODE" in
+    fallback|fixed) ;;
+    *)
+        MESSAGE="Invalid app-it port_mode: $PORT_MODE. Expected fallback or fixed. Rebuild after correcting scripts/app-it.config.json."
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+        exit 1
+        ;;
+esac
+
 # --- PATH augmentation -------------------------------------------------
-# Finder/Dock launches start with bare PATH=/usr/bin:/bin. Cover every
-# common version-manager / language-toolchain bin path. Each entry is a
-# no-op when the directory doesn't exist (PATH lookups silently skip).
+# Finder/Dock start with bare PATH=/usr/bin:/bin; cover common toolchains.
 NVM_BIN=""
 if [ -d "$HOME/.nvm/versions/node" ]; then
     LATEST_NVM_NODE="$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)"
@@ -70,11 +59,7 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 
 # --- Pre-flight: required binary present? ------------------------------
-# Catch missing-binary failures (bun not on PATH, pnpm not installed,
-# python missing) in <1s instead of waiting 60s for the readiness probe
-# to time out into a misleading "port literal hardcoded?" alert. If the
-# command starts with a directory hop (`cd web && npm run dev`), validate
-# the actual runner instead of the shell builtin.
+# Fail fast on missing runners, including `cd web && npm run dev` shapes.
 COMMAND_ROOT="$PROJECT_ROOT"
 COMMAND_TO_RUN="$START_COMMAND"
 case "$COMMAND_TO_RUN" in
@@ -107,45 +92,63 @@ case "$COMMAND_TO_RUN" in
 esac
 
 # --- Stale-state cleanup ----------------------------------------------
+pid_identity() {
+    local pid="${1:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}'
+}
+
+write_pid_identity() {
+    local pid="$1"
+    local file="$2"
+    local identity
+    identity="$(pid_identity "$pid" || true)"
+    if [ -n "$identity" ]; then
+        printf '%s\n' "$identity" > "$file"
+    else
+        rm -f "$file"
+    fi
+}
+
+pid_identity_state_valid() {
+    local pid="$1"
+    local file="$2"
+    local recorded current
+    [ -f "$file" ] || return 0  # legacy generated state; reattach still needs listener proof below.
+    recorded="$(sed -n '1p' "$file" 2>/dev/null || true)"
+    current="$(pid_identity "$pid" || true)"
+    [ -n "$recorded" ] && [ "$recorded" = "$current" ]
+}
+
 # If the recorded server PID is dead, scrap both PID and PORT files.
 if [ -f "$PID_FILE" ]; then
     EXPECTED_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null; then
-        rm -f "$PID_FILE" "$PORT_FILE"
+    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null \
+        || ! pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
 # --- Reattach to our own existing server ------------------------------
-# Permissive ownership-tree gate (F38 fix). The recorded PID is treated
-# as the ROOT of an ownership tree — the actual TCP listener may be a
-# child/grandchild/great-grandchild (e.g. `pnpm dev` → `node` →
-# `next-server` worker). Strict PID-equality match (`grep -qx PID`)
-# silently failed for the most common JS dev stack.
-#
-# Reattach only when ALL hold:
-#   1. Recorded supervisor PID is alive
-#   2. Some process is bound to the recorded port
-#   3. That listener is in our supervisor's descendant tree
-#      (anti-passive-attach: don't attach to non-our-server)
-#   4. The server is responding HTTP (any status)
+# Permissive ownership-tree gate (F38 fix): the listener may be a child or
+# grandchild of pnpm/npm. Reattach only if the recorded PID is alive, the port is
+# bound by a descendant, and HTTP responds.
 CHOSEN_PORT=""
 if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     EXPECTED_PID="$(cat "$PID_FILE")"
     EXPECTED_PORT="$(cat "$PORT_FILE")"
     REATTACH_OK=0
 
-    if kill -0 "$EXPECTED_PID" 2>/dev/null; then
+    if kill -0 "$EXPECTED_PID" 2>/dev/null && pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
         LISTENERS="$(lsof -ti tcp:"$EXPECTED_PORT" 2>/dev/null || true)"
         if [ -n "$LISTENERS" ]; then
             # Walk descendants up to 4 levels (pnpm → node → node → next-server).
             DESCENDANTS="$EXPECTED_PID"
             CURRENT="$EXPECTED_PID"
             for _ in 1 2 3 4; do
-                # Expand one PID per pgrep call. macOS `pgrep -P` returns nothing
-                # for a space-joined / trailing-space argument, so passing the
-                # whole generation at once would silently halt the walk at the
-                # first level and miss deeper listeners (npm → node-vite,
-                # pnpm → node → next-server). Walk per-pid so each call is clean.
+                # One PID per pgrep call; macOS `pgrep -P` rejects generations.
                 NEXT_GEN=""
                 for _pid in $CURRENT; do
                     NEXT_GEN="$NEXT_GEN $(pgrep -P "$_pid" 2>/dev/null | tr '\n' ' ')"
@@ -171,31 +174,38 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     if [ "$REATTACH_OK" = "1" ]; then
         CHOSEN_PORT="$EXPECTED_PORT"
     else
-        rm -f "$PID_FILE" "$PORT_FILE"
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
 # --- Allocate a free port + start server ------------------------------
 if [ -z "$CHOSEN_PORT" ]; then
-    # Scan from PREFERRED_PORT upward for the first free port.
-    for p in $(seq "$PREFERRED_PORT" "$((PREFERRED_PORT + 50))"); do
-        if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
-            CHOSEN_PORT="$p"
-            break
+    if [ "$PORT_MODE" = "fixed" ]; then
+        if lsof -i tcp:"$PREFERRED_PORT" >/dev/null 2>&1; then
+            MESSAGE="Port $PREFERRED_PORT is busy and this launcher is configured with port_mode fixed. App It did not choose a fallback port because browser storage may be tied to http://localhost:$PREFERRED_PORT. Quit the process using that port, or change port/port_mode in scripts/app-it.config.json and rebuild."
+            printf '%s\n' "$MESSAGE" >&2
+            /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+            exit 1
         fi
-    done
+        CHOSEN_PORT="$PREFERRED_PORT"
+    else
+        # Scan from PREFERRED_PORT upward for the first free port.
+        for p in $(seq "$PREFERRED_PORT" "$((PREFERRED_PORT + 50))"); do
+            if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
+                CHOSEN_PORT="$p"
+                break
+            fi
+        done
 
-    if [ -z "$CHOSEN_PORT" ]; then
-        /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find a free port\" message \"Searched $PREFERRED_PORT–$((PREFERRED_PORT + 50)). Quit something using one of those ports and try again.\""
-        exit 1
+        if [ -z "$CHOSEN_PORT" ]; then
+            /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find a free port\" message \"Searched $PREFERRED_PORT–$((PREFERRED_PORT + 50)). Quit something using one of those ports and try again.\""
+            exit 1
+        fi
     fi
 
     cd "$PROJECT_ROOT"
 
-    # setsid detaches the dev server from the wrapper's process group so
-    # SIGHUP propagation can't kill the daemonized tree when the wrapper
-    # exits. macOS 12+ has /usr/bin/setsid; fall back to nohup+disown
-    # plus an explicit `trap '' HUP` block on older systems.
+    # Detach so wrapper exit/SIGHUP cannot kill the warm server tree.
     if command -v setsid >/dev/null 2>&1; then
         PORT="$CHOSEN_PORT" setsid bash -c "$START_COMMAND" > "$SERVER_LOG" 2>&1 < /dev/null &
     else
@@ -204,6 +214,7 @@ if [ -z "$CHOSEN_PORT" ]; then
     SERVER_PID=$!
     echo "$SERVER_PID" > "$PID_FILE"
     echo "$CHOSEN_PORT" > "$PORT_FILE"
+    write_pid_identity "$SERVER_PID" "$PID_ID_FILE"
     disown "$SERVER_PID" 2>/dev/null || true
 
     URL="http://localhost:$CHOSEN_PORT"
@@ -211,27 +222,27 @@ if [ -z "$CHOSEN_PORT" ]; then
     # Two-stage readiness probe.
     # Stage 1: port is bound (any process listening counts).
     READY=0
+    START_FAILURE=""
     for _ in $(seq 1 120); do
         if lsof -i tcp:"$CHOSEN_PORT" >/dev/null 2>&1; then
             READY=1
             break
         fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            START_FAILURE="The dev server process exited before binding to $URL."
+            break
+        fi
         sleep 0.5
     done
 
-    # Stage 2: server returns *any* HTTP status (drop -f). 5xx counts —
-    # the user sees the real error in the wrapper window, which beats a
-    # 60-second timeout into a misleading alert.
+    # Stage 2: any HTTP status counts; 5xx should open as the real app error.
     if [ "$READY" = "1" ]; then
         READY=0
         for _ in $(seq 1 120); do
             STATUS="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "$URL" 2>/dev/null || true)"
             if [ -n "$STATUS" ] && [ "$STATUS" != "000" ]; then
                 READY=1
-                # Soft-note 5xx in the launcher log — server is up, the page may
-                # be broken but that's a project-state issue (missing data file,
-                # auth failure, etc.). The wrapper still loads it so the user
-                # can see the actual error.
+                # Log 5xx without blocking; the wrapper should show the error.
                 if [ "${STATUS:0:1}" = "5" ]; then
                     echo "$(date) — server up at $URL but returning HTTP $STATUS — see app's log for details" >> "$SERVER_LOG"
                 fi
@@ -243,8 +254,15 @@ if [ -z "$CHOSEN_PORT" ]; then
 
     if [ "$READY" != "1" ]; then
         TAIL="$(tail -40 "$SERVER_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 800)"
-        rm -f "$PID_FILE" "$PORT_FILE"
-        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"The dev server did not bind to $URL within 60 seconds.\n\nCheck $SERVER_LOG for the cause. Common ones:\n• Missing dependencies (run package-manager install in the repo)\n• Port literal hardcoded in START_COMMAND or framework config\n• Server crashed during startup\n\nLast log lines:\n$TAIL\""
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
+        MODE_NOTE=""
+        if [ "$PORT_MODE" = "fixed" ]; then
+            MODE_NOTE="\n\nFixed-port mode did not fall back because browser storage may be tied to http://localhost:$PREFERRED_PORT."
+        fi
+        [ -n "$START_FAILURE" ] || START_FAILURE="The dev server did not bind to $URL within 60 seconds."
+        MESSAGE="$START_FAILURE$MODE_NOTE\n\nCheck $SERVER_LOG for the cause. Common ones:\n• Missing dependencies (run package-manager install in the repo)\n• Port literal hardcoded in START_COMMAND or framework config\n• Server crashed during startup\n\nLast log lines:\n$TAIL"
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"$MESSAGE\""
         exit 1
     fi
 fi
@@ -252,21 +270,14 @@ fi
 URL="http://localhost:$CHOSEN_PORT"
 
 # --- Headless smoke seam (CI / SSH / --check) --------------------------
-# Everything a real Dock click does has now run EXCEPT opening the window:
-# the dev server is up, daemonized, reachable, and its pid/port are recorded.
-# With APP_IT_SMOKE set, print the runtime URL and exit 0 instead of handing
-# off to the GUI wrapper. The server stays warm so the caller can probe it
-# (curl, desktop:doctor) and then stop it (desktop:quit). Zero effect on a
-# normal Dock launch (APP_IT_SMOKE unset).
+# APP_IT_SMOKE runs the Dock path up to, but not including, opening WebKit.
 if [ -n "${APP_IT_SMOKE:-}" ]; then
     echo "app-it smoke: $APP_NAME ready at $URL (server pid $(cat "$PID_FILE" 2>/dev/null))"
     exit 0
 fi
 
 # --- Hand off to the native WebKit wrapper -----------------------------
-# exec replaces this bash process with the Swift binary. The .app's identity
-# stays intact (CFBundleIdentifier from Info.plist), so the Dock keeps showing
-# OUR icon — not Chrome's, not Safari's.
+# exec preserves this .app's Dock identity while WebKit owns the foreground.
 WRAPPER="$HERE/wrapper"
 if [ ! -x "$WRAPPER" ]; then
     /usr/bin/osascript -e "display alert \"$APP_NAME failed to launch\" message \"Native wrapper missing at:\n$WRAPPER\n\nRun desktop:build to rebuild the bundle.\""

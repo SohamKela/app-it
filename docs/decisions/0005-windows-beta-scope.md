@@ -91,7 +91,7 @@ what only a Windows maintainer can settle.
 | **Launch the dev server** | `run-template.sh`: augment PATH, pre-flight the binary + `node_modules`, scan `[PORT..PORT+50]` for a free port, `setsid bash -c "$START_COMMAND"` with `PORT` env, record `server.pid` / `server.port` under `~/Library/Application Support/app-it/<slug>/`. | `run-template.ps1`: augment PATH (nvm-windows, fnm, Volta, Scoop shims, `pnpm`), pre-flight, scan for a free port, start the dev server as a **child inside a Win32 Job Object** with `$env:PORT`, record `server.pid` / `server.port` under `%LOCALAPPDATA%\app-it\<slug>\`. | Free-port scan is race-free under the real Windows TCP stack (`System.Net.Sockets.TcpListener` bind-probe is likely more reliable than `Get-NetTCPConnection`, which only lists *existing* connections). PATH augmentation covers the version managers Windows devs actually use. |
 | **Hold the port (keep the server alive)** | `setsid` detaches the dev server from the wrapper's process group, so it **survives the wrapper exiting** — SIGHUP can't reach it. The server is a true daemon; the wrapper reattaches by port on relaunch. | The dev server lives **inside the host's Job Object**, not detached. Its lifetime is anchored to the host process (which stays resident, tray-hidden, across soft-closes). Job Objects are nested-aware on Windows 8+, so `npm → node → vite` stays inside the job and can't leak. | **The load-bearing divergence.** macOS keeps the server warm even across a full wrapper exit; the Windows job-bound server dies when the host dies. Is the orphan-safe job model the right trade, or does a maintainer want a truly-detached daemon (named-pipe broker) to match macOS warm-keep across full quits? **Beta picks job-bound** — orphan-safety over exact parity. |
 | **Soft-close vs hard-quit** | `windowShouldClose` sets `quittingViaWindowClose`; `applicationShouldTerminate` reads it. Red-X / ⌘W → leave server warm. ⌘Q → kill server. AppKit's lifecycle drives it, not a guessed signal. | WPF `Window.Closing` with `e.Cancel = true` → **hide to tray** (soft-close). Explicit **Quit** (tray-menu "Quit", optionally `Ctrl+Shift+Q`) → dispose the Job Object → server dies, port freed. Requires `Application.ShutdownMode = OnExplicitShutdown` (not `OnLastWindowClose`), or closing the window would terminate everything. | Windows has **no first-class OS distinction** between "close this window" and "quit this app" — the X button is ambiguous and many Windows users expect X = quit. Does silent minimize-to-tray on X surprise them? Is a tray-only Quit discoverable enough? **Beta: X/minimize = soft-close to tray; Quit only from the tray menu.** A maintainer judges the convention. |
-| **Port-clean on quit** | `killServer()` TERMs the recorded pid then `lsof -ti tcp:$port \| kill`; `desktop-quit.sh` runs a three-stage TERM → port-sweep → SIGKILL cleanup for re-parented children. | Disposing the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` **atomically reaps the whole tree** — no signal cascade. `desktop-quit.ps1` is the defensive fallback: `Get-NetTCPConnection -LocalPort $port -State Listen \| ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }`. | Job teardown actually reaps grandchildren (vite → esbuild workers) on real hardware, with no breakaway. `Get-NetTCPConnection`'s `OwningProcess` maps cleanly to the listener. |
+| **Port-clean on quit** | `killServer()` (⌘Q) and `desktop-quit.sh` stop the recorded PID tree **only when ownership is proven** — the recorded `ps -o lstart=` identity still matches, or (legacy state) the recorded tree owns the recorded listener. A reused/foreign PID is left alone; no blind `lsof \| kill` port sweep. | Disposing the Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` **atomically reaps the whole tree** — no signal cascade. `desktop-quit.ps1` is the defensive fallback and applies the **same ownership proof**: it stops the recorded PID tree only when the `server.identity` token (the dev server's `StartTime` as a UTC FILETIME) still matches, or (legacy state) the recorded tree owns the recorded listener. It no longer stops whatever happens to own the recorded port. | Job teardown reaps grandchildren (vite → esbuild workers) on real hardware with no breakaway, and the ownership proof stops an orphaned dev-server tree **while leaving an unrelated process on the same port alone**. `Get-Process().StartTime` and `Get-NetTCPConnection`'s `OwningProcess` behave as assumed on real hardware. |
 | **Warm relaunch** | New `run` reattaches to the surviving daemon via pid → descendant-walk → port → HTTP gate (~250 ms vs multi-second cold start). | **Single-instance** via a named `Mutex` + named pipe: a second launch signals the resident (tray-hidden) host to re-show its window **instantly**. "Warm" = the host is still resident, so the server never left its job — no reattach-to-detached-server needed. After a reboot or full quit, it's a cold start (same as macOS once `server.pid` is dead). | Single-instance mechanism choice (**named `Mutex` + named pipe** for the beta, vs `WM_COPYDATA` or a single-instance NuGet), re-show latency, focus-stealing, and multi-monitor placement on real hardware. |
 
 **Why the answer to "how does WPF tell close from quit" is a contract, not a
@@ -112,7 +112,7 @@ then launch the host with the resolved `START_COMMAND` + `PORT`; the host does
 the job-wrapped spawn. The one exception is the **Edge `--app=` fallback**, where
 there is no WPF host — there `run-template-edge.ps1` owns the job itself and
 accepts the macOS-Chrome-fallback warts (no clean close-vs-quit; `desktop-quit.ps1`
-is the primary shutdown). Steps 2.2 and 2.3 must not both try to own the job.
+is the primary shutdown). The host and the bootstrap launcher must not both try to own the job.
 
 ### Signing — unsigned, SmartScreen click-through documented
 
@@ -225,12 +225,12 @@ contributor's checklist.
 
 ## Consequences
 
-- Steps 2.1–2.4 have a concrete contract: WPF + WebView2 host, the
+- The Windows host has a concrete contract: WPF + WebView2 host, the
   `ShutdownMode=OnExplicitShutdown` + `Closing`-hides + tray-Quit lifecycle
   triple, Job-Object port lifetime, multi-res `.ico`, shared config + optional
-  `platform.windows` block. Step 3.1's `windows-latest` CI exercises what a Mac
+  `platform.windows` block. The `windows-latest` CI lane exercises what a Mac
   can't (PowerShell lint, `dotnet build`, manifest parse, placeholder-icon
-  round-trip). Step 3.2's WINDOWS.md is seeded directly from the
+  round-trip). WINDOWS.md is seeded directly from the
   "deferred to a maintainer" list.
 - Every public artifact (README callout, COMPATIBILITY row, WINDOWS.md,
   CHANGELOG, the Windows SKILL.md `description`) must read **beta · scaffolded ·

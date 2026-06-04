@@ -5,7 +5,7 @@
 // Usage: wrapper <url> [app-name] [port] [pid-file] [polyfill-js-path]
 //   url               — http(s) URL to load (typically http://localhost:PORT)
 //   app-name          — window title and Dock badge (e.g. "Momó Studio")
-//   port              — optional, used by Cmd+Q to sweep stragglers off the dev port
+//   port              — optional, used by Cmd+Q only with PID ownership proof
 //   pid-file          — optional, path to the daemonized server's pid file.
 //                       killServer() ALSO looks for `backend.pid` and
 //                       `backend.port` as siblings in the same directory and
@@ -20,7 +20,7 @@
 //                       skill's `fsa-polyfill-template.js` for a worked
 //                       example. Pass an empty string to skip injection.
 //
-// Build: swiftc -O wrapper.swift -o <out> -framework Cocoa -framework WebKit
+// Build: swiftc wrapper.swift -o <out> -framework Cocoa -framework WebKit
 //
 // WHY THIS EXISTS (read before "improving"):
 // Earlier app-it revisions used Chrome `--app=URL`. That fails three structural
@@ -34,6 +34,7 @@
 // activation natively, and WebKit boots in ~200ms.
 
 import Cocoa
+import Darwin
 import WebKit
 
 private let DEFAULT_WIDTH: CGFloat = 1280
@@ -346,10 +347,9 @@ final class AppDelegate: NSObject,
     }
 
     private func killServer() {
-        // Frontend (or single-server) — recorded PID + argv port.
-        terminatePid(fromFile: pidFilePath, removeFile: true)
-        if let p = port {
-            sweepPort(p)
+        // Frontend (or single-server) — recorded PID + start-time identity.
+        if let pidPath = pidFilePath {
+            stopOwnedRuntime(pidFilePath: pidPath, port: port)
         }
 
         // Multi-server sibling discovery. The multiserver run-template only
@@ -361,39 +361,138 @@ final class AppDelegate: NSObject,
         let logDir = (pidPath as NSString).deletingLastPathComponent
         let backendPidPath = (logDir as NSString).appendingPathComponent("backend.pid")
         let backendPortPath = (logDir as NSString).appendingPathComponent("backend.port")
-        terminatePid(fromFile: backendPidPath, removeFile: true)
-        if let raw = try? String(contentsOfFile: backendPortPath, encoding: .utf8),
-            let bport = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-            bport > 0
-        {
-            sweepPort(bport)
-            // Don't remove backend.port — symmetric with how the existing
-            // FE branch leaves server.port intact. desktop-quit.sh and the
-            // launcher's stale-state cleanup handle port-file lifecycle.
+        stopOwnedRuntime(pidFilePath: backendPidPath, port: readPort(fromFile: backendPortPath))
+    }
+
+    private func stopOwnedRuntime(pidFilePath: String, port: Int?) {
+        guard let pid = readPid(fromFile: pidFilePath), pid > 1 else {
+            removeRuntimeState(pidFilePath: pidFilePath)
+            return
+        }
+
+        let identityFilePath = identityPath(forPidFile: pidFilePath)
+        let tree = descendantTree(root: pid)
+        let ownedListeners = ownedListenerPids(in: tree, port: port)
+        let hasIdentity = FileManager.default.fileExists(atPath: identityFilePath)
+
+        // New state uses a PID start-time proof, which catches PID reuse.
+        // Legacy state has no identity file, so only stop it if the recorded
+        // PID tree owns the recorded listener. Never kill by port alone.
+        let ownershipOK =
+            (hasIdentity && pidIdentityMatches(pid: pid, identityFilePath: identityFilePath)) ||
+            (!hasIdentity && !ownedListeners.isEmpty)
+
+        if ownershipOK {
+            let targets = tree.union(ownedListeners).filter { $0 > 1 && $0 != Darwin.getpid() }
+            terminate(pids: targets, signal: SIGTERM)
+            usleep(300_000)
+            terminate(pids: Set(targets.filter { isLivePid($0) }), signal: SIGKILL)
+        }
+
+        removeRuntimeState(pidFilePath: pidFilePath)
+    }
+
+    private func readPid(fromFile path: String) -> Int32? {
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+            let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return nil }
+        return pid
+    }
+
+    private func readPort(fromFile path: String) -> Int? {
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+            let port = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+            port > 0
+        else { return nil }
+        return port
+    }
+
+    private func identityPath(forPidFile path: String) -> String {
+        let base = (path as NSString).deletingPathExtension
+        return (base as NSString).appendingPathExtension("identity") ?? "\(base).identity"
+    }
+
+    private func portPath(forPidFile path: String) -> String {
+        let base = (path as NSString).deletingPathExtension
+        return (base as NSString).appendingPathExtension("port") ?? "\(base).port"
+    }
+
+    private func removeRuntimeState(pidFilePath: String) {
+        try? FileManager.default.removeItem(atPath: pidFilePath)
+        try? FileManager.default.removeItem(atPath: identityPath(forPidFile: pidFilePath))
+        try? FileManager.default.removeItem(atPath: portPath(forPidFile: pidFilePath))
+    }
+
+    private func pidIdentityMatches(pid: Int32, identityFilePath: String) -> Bool {
+        guard let recorded = try? String(contentsOfFile: identityFilePath, encoding: .utf8),
+            let current = pidIdentity(pid)
+        else { return false }
+        return normalizeProcessText(recorded) == current
+    }
+
+    private func pidIdentity(_ pid: Int32) -> String? {
+        let output = runAndCapture("/bin/ps", ["-o", "lstart=", "-p", String(pid)])
+        let normalized = normalizeProcessText(output)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func normalizeProcessText(_ value: String) -> String {
+        value.split { $0 == " " || $0 == "\n" || $0 == "\t" }
+            .joined(separator: " ")
+    }
+
+    private func isLivePid(_ pid: Int32) -> Bool {
+        Darwin.kill(pid, 0) == 0
+    }
+
+    private func descendantTree(root: Int32) -> Set<Int32> {
+        guard isLivePid(root) else { return [] }
+        var all = Set([root])
+        var current = [root]
+
+        for _ in 1...4 {
+            var next: [Int32] = []
+            for pid in current {
+                let output = runAndCapture("/usr/bin/pgrep", ["-P", String(pid)])
+                next.append(contentsOf: parsePidList(output))
+            }
+            next = next.filter { !all.contains($0) }
+            if next.isEmpty { break }
+            all.formUnion(next)
+            current = next
+        }
+
+        return all
+    }
+
+    private func ownedListenerPids(in tree: Set<Int32>, port: Int?) -> Set<Int32> {
+        guard let port = port else { return [] }
+        let output = runAndCapture("/usr/sbin/lsof", ["-ti", "tcp:\(port)"])
+        return Set(parsePidList(output).filter { tree.contains($0) })
+    }
+
+    private func parsePidList(_ output: String) -> [Int32] {
+        output.split { $0 == " " || $0 == "\n" || $0 == "\t" }
+            .compactMap { Int32($0) }
+    }
+
+    private func terminate(pids: Set<Int32>, signal: Int32) {
+        for pid in pids {
+            Darwin.kill(pid, signal)
         }
     }
 
-    private func terminatePid(fromFile path: String?, removeFile: Bool) {
-        guard let path = path,
-            let raw = try? String(contentsOfFile: path, encoding: .utf8),
-            let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-            pid > 1
-        else { return }
-        kill(pid, SIGTERM)
-        if removeFile {
-            try? FileManager.default.removeItem(atPath: path)
-        }
-    }
-
-    private func sweepPort(_ p: Int) {
+    private func runAndCapture(_ executable: String, _ arguments: [String]) -> String {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = [
-            "-c",
-            "for q in $(/usr/sbin/lsof -ti tcp:\(p) 2>/dev/null); do /bin/kill -TERM $q 2>/dev/null; done",
-        ]
+        let pipe = Pipe()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = arguments
+        task.standardOutput = pipe
+        task.standardError = Pipe()
         try? task.run()
         task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     // MARK: - Find in page

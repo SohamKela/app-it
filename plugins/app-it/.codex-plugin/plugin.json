@@ -36,6 +36,9 @@
       "Give this local app a professional icon and macOS launcher.",
       "Package this project as a local macOS .app."
     ],
+    "websiteURL": "https://github.com/Christian-Katzmann/app-it",
+    "privacyPolicyURL": "https://github.com/Christian-Katzmann/app-it/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Christian-Katzmann/app-it/blob/main/TERMS.md",
     "brandColor": "#2F6FED"
   }
 }

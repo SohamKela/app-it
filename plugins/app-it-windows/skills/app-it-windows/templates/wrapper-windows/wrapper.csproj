@@ -23,7 +23,7 @@
     <RootNamespace>AppItWindows</RootNamespace>
     <!-- Published as app-it-host.exe; desktop-build.ps1 copies it to
          desktop\<App Name>\<App Name>.exe. Taskbar identity comes from the
-         window + .ico, not the file name (see README.md). -->
+         window + .ico, not the file name. -->
     <AssemblyName>app-it-host</AssemblyName>
     <Version>0.1.0</Version>
 

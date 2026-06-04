@@ -1,12 +1,6 @@
 #!/bin/bash
-# app-it icon preview — render ONE source icon at real Dock/Finder sizes and
-# flag, in plain language, the things that quietly ruin an app icon.
-#
-# This is the "bring your own icon" safety net: see how a mark will actually
-# look in the Dock BEFORE you build the .app, instead of discovering a blurry
-# wordmark after it is already installed. It is the icon-pipeline sibling of
-# desktop-doctor.sh — same ok/warn/fail vocabulary, same "says 'probably' when
-# it cannot be certain", same paste-into-a-bug-report output.
+# app-it icon preview — render one source icon at real Dock/Finder sizes and
+# flag the issues that quietly ruin app icons.
 #
 # Two ways to call it:
 #   APP_NAME='My App' APP_SLUG='my-app' ./desktop-icons-preview.sh
@@ -22,19 +16,9 @@
 #   --out DIR       write preview.html / preview.png into DIR instead
 #   -h | --help
 #
-# DESIGN CONTRACT (mirrors desktop-doctor.sh):
-#   * Deterministic and local. No network, no installs, no new dependencies.
-#     Same toolchain the icon pipeline already uses: sips + iconutil, plus an
-#     optional `swift` pass (present on app-it's default native path) for the
-#     pixel-level checks, with a `magick` fallback for the contact sheet.
-#   * The HTML is ALWAYS produced (zero extra dependencies). The pixel-level
-#     "deep" checks and the PNG contact sheet degrade with an honest note when
-#     `swift`/`magick` are absent — they are never silently skipped.
-#   * Read-only with respect to YOUR project. The only thing it writes is its
-#     own report under assets/icons/ (already gitignored by the build).
-#   * Exit 0 whenever it produced a report, regardless of findings — this is a
-#     report, not a test that should make `npm` spew red. Non-zero only when it
-#     genuinely cannot run (bad flag, no source image, unreadable file).
+# Contract: deterministic, local, no installs. Always writes HTML; deep checks
+# and PNG contact sheet degrade honestly when swift/magick are absent. Exit 0
+# for any completed report.
 
 set -uo pipefail   # NOT -e: sips/file probes fail by design; each is guarded.
 
@@ -82,8 +66,7 @@ html_escape() {
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
 }
 
-# Findings are emitted to the terminal AND collected as HTML at the same time,
-# so the two reports can never drift.
+# Emit terminal and HTML findings from one path.
 HTML_FINDINGS=""
 find_emit() { # level  message  [why]
     local lvl="$1" msg="$2" why="${3:-}"
@@ -158,10 +141,8 @@ printf '  %ssource%s   %s\n' "$C_DIM" "$C_OFF" "$SOURCE"
 printf '  %sreport%s   %s/preview.html\n' "$C_DIM" "$C_OFF" "$OUT_DIR"
 
 # --- Normalize to a squared 1024 master, exactly like desktop-icons.sh -------
-# desktop-icons.sh forces real PNG bytes (JPEG-in-.png would break iconutil) and
-# then squares to 1024x1024 with `sips -z` — which DISTORTS a non-square source.
-# We reproduce that here so the preview shows the TRUTH of the future .icns, not
-# a flattering aspect-preserving render.
+# Real PNG bytes, then sips -z square. This shows the future .icns truth,
+# including non-square distortion.
 MASTER="$TMP/master.png"
 if [ "$IS_SVG" = "1" ]; then
     RASTER="$TMP/raster.png"
@@ -221,7 +202,7 @@ if [ -n "${SRC_W:-}" ] && [ -n "${SRC_H:-}" ]; then
             "It will be upscaled to fill the tile and look blurry. Supply a 1024x1024 (512 at the very least) master."
     fi
 
-    # Aspect ratio of the *literal* source — squaring will distort a wide/tall one.
+    # Literal source ratio; squaring will distort wide/tall files.
     if [ "$SRC_W" -ne "$SRC_H" ]; then
         if   flt "$SRC_W >= $SRC_H * 1.6"; then
             find_emit warn "Source looks like a horizontal wordmark (${SRC_W}x${SRC_H})." \
@@ -240,8 +221,7 @@ if [ -n "${SRC_W:-}" ] && [ -n "${SRC_H:-}" ]; then
     fi
 fi
 
-# Alpha / background — only meaningful for raster sources. `sips` reports
-# hasAlpha/space/format unreliably for SVG, so we defer to Tier-2 coverage there.
+# Raster alpha check; SVG alpha is handled by rendered Tier 2 output.
 if [ "$IS_SVG" != "1" ]; then
     if [ "$SRC_HASALPHA" = "no" ]; then
         case "$(printf '%s' "$SRC_FORMAT" | tr '[:upper:]' '[:lower:]')" in
@@ -280,7 +260,7 @@ let a = CommandLine.arguments
 guard a.count >= 4, let img = NSImage(contentsOfFile: a[1]) else { exit(3) }
 let masterPath = a[1], outPath = a[2], metricsPath = a[3]
 
-// Draw the icon into an RGBA8 sRGB context at `n`x`n` and return the raw bytes.
+// Draw the icon into RGBA8 sRGB at n x n and return raw bytes.
 func raster(_ image: NSImage, _ n: Int) -> [UInt8]? {
     guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
           let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8,
@@ -299,10 +279,7 @@ func raster(_ image: NSImage, _ n: Int) -> [UInt8]? {
     return Array(UnsafeBufferPointer(start: p, count: n * n * 4))
 }
 
-// Luminance stats + opaque bounding box over a rasterization. Returns
-// (coverage, lumaMean, lumaStd, lumaRange, contentW, contentH, marginMin).
-// `range` (max-min) separates a clear sparse mark (dark tile + bright glyph =
-// low std but high range) from a muddy image that averages to one tone.
+// Luminance stats plus opaque bounding box over a rasterization.
 func stats(_ px: [UInt8], _ n: Int) -> (Double, Double, Double, Double, Double, Double, Double) {
     let aT = 0.10
     var opaque = 0, minX = n, minY = n, maxX = -1, maxY = -1
@@ -354,10 +331,7 @@ margin_min=\(String(format: "%.4f", margin))
 """
 try? metrics.write(toFile: metricsPath, atomically: true, encoding: .utf8)
 
-// --- Contact sheet: the icon at 16..256 on a light and a dark panel ---------
-// Drawn in the CGContext's NATURAL bottom-up space (flipped:false). A flipped
-// NSGraphicsContext renders NSAttributedString glyphs mirrored offscreen, so we
-// compute every y from the bottom and keep text upright.
+// Contact sheet. Use bottom-up coordinates; flipped text draws wrong offscreen.
 let sheetSizes = [16, 32, 64, 128, 256]
 let pad = 28.0, gap = 26.0, sizeLabelH = 22.0, panelLabelH = 30.0, innerPad = 16.0
 let colW: [Double] = sheetSizes.map { max(Double($0), 64.0) }
@@ -431,10 +405,7 @@ if [ "$HAVE_TIER2" = "1" ]; then
     MARGIN_MIN="$(awk -F= '/^margin_min=/{print $2}' "$METRICS")"
     CONTENT_ASPECT="$(awk -F= '/^content_aspect=/{print $2}' "$METRICS")"
 
-    # Contrast at 16px. Luminance can detect a genuinely near-flat tile, but it
-    # cannot tell a busy-but-illegible image from a simple legible one (both can
-    # have low spread). So this fires only on a real near-flat tile (high
-    # precision); the rendered 16/32px tiles let the human judge the rest.
+    # Only warn on genuinely near-flat 16px contrast; humans judge busy icons.
     if flt "$LUMA16_RANGE < 0.15"; then
         find_emit warn "Almost no contrast at 16px — it flattens into a near-solid tile in the Dock." \
             "Use bolder shapes or a stronger figure-to-background contrast so something still reads at the smallest size."
@@ -445,7 +416,7 @@ if [ "$HAVE_TIER2" = "1" ]; then
     if flt "$COVERAGE >= 0.97"; then
         find_emit ok "Fills the tile with its own background — reads on both light and dark Docks."
     else
-        # Transparent padding — how close the mark gets to the safe-area edge.
+        # Transparent padding relative to the safe-area edge.
         if   flt "$MARGIN_MIN > 0.22"; then
             PCT="$(awk "BEGIN{printf \"%d\", $MARGIN_MIN*100}")"
             find_emit warn "Large transparent margin (~${PCT}% empty on the tightest edge) — the mark floats small in the tile." \
@@ -457,7 +428,7 @@ if [ "$HAVE_TIER2" = "1" ]; then
             find_emit ok "Sits in a sensible safe-area margin."
         fi
 
-        # Wide/tall *visible* mark even inside a square canvas (transparent banner).
+        # Visible mark ratio, even when the canvas itself is square.
         if   flt "$CONTENT_ASPECT > 1.7"; then
             find_emit warn "The visible mark is much wider than it is tall — it reads like a banner." \
                 "Even centered in a square file, a wide logotype shrinks to a sliver at 16px. Prefer a compact symbol."
@@ -466,9 +437,7 @@ if [ "$HAVE_TIER2" = "1" ]; then
                 "A tall sliver is hard to recognize at small sizes. Prefer a compact, roughly-square symbol."
         fi
 
-        # Light/dark visibility matters only for a genuinely FLOATING mark — one
-        # with little body of its own. A shaped tile (squircle/circle) that fills
-        # most of the canvas carries its own background, so skip the check.
+        # Floating marks need light/dark checks; filled tiles carry a background.
         if flt "$COVERAGE < 0.55"; then
             if   flt "$LUMA_MEAN < 0.20"; then
                 find_emit warn "Dark mark on transparency — it can vanish against a dark Dock or menu bar." \
@@ -571,8 +540,7 @@ cat <<HTMLHEAD
           border-radius: 14px; }
   .tile.light { background: #ececf0; }
   .tile.dark  { background: #1c1c1e; }
-  /* Small sizes render at true pixel size (the legibility-critical view);
-     256/512 are capped to fit the swatch. */
+  /* Small sizes render true; large sizes are capped to fit. */
   .tile img { display: block; max-width: 128px; max-height: 128px; image-rendering: -webkit-optimize-contrast; }
   .px { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #6e6e73; }
   .foot { color: #86868b; font-size: 12.5px; margin-top: 36px; line-height: 1.6; }

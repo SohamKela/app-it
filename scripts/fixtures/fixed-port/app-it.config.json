@@ -1,0 +1,17 @@
+{
+  "_comment": "Fixed-port fixture. The launcher must use exactly :41090 and refuse fallback when that port is busy, because browser storage is tied to one origin.",
+  "apps": [
+    {
+      "name": "Fixed Port",
+      "slug": "fixed-port",
+      "port": 41090,
+      "port_mode": "fixed",
+      "start_command": "node stub-server.js --port $PORT",
+      "bundle_id": "com.user.fixed-port",
+      "version": "0.1.0",
+      "polyfill_path": "",
+      "backend_port": null,
+      "backend_start_command": null
+    }
+  ]
+}

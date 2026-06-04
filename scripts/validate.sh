@@ -15,6 +15,11 @@ require_file() {
   [[ -f "$1" ]] || fail "missing required file: $1"
 }
 
+require_text() {
+  local file="$1" text="$2"
+  grep -qF "$text" "$file" || fail "$file missing required text: $text"
+}
+
 # --- macOS plugin files -------------------------------------------------------
 require_file ".claude-plugin/marketplace.json"
 require_file "plugins/app-it/.claude-plugin/plugin.json"
@@ -22,11 +27,17 @@ require_file "plugins/app-it/.codex-plugin/plugin.json"
 require_file ".agents/plugins/marketplace.json"
 require_file "plugins/app-it/skills/app-it/SKILL.md"
 require_file "plugins/app-it/skills/app-it/templates/wrapper.swift"
+require_file "plugins/app-it/skills/app-it/templates/native-run-stub.c"
 require_file "plugins/app-it/skills/app-it/templates/desktop-build.sh"
 require_file "plugins/app-it/skills/app-it/templates/desktop-doctor.sh"
+require_file "plugins/app-it/skills/app-it/templates/desktop-verify.sh"
 require_file "plugins/app-it/skills/app-it/templates/desktop-icons-preview.sh"
 require_file "plugins/app-it/skills/app-it/templates/placeholder-icon-gen.sh"
+require_file "scripts/coverage.sh"
+require_file "scripts/plugin-eval-score.sh"
 require_file "README.md"
+require_file "PRIVACY.md"
+require_file "TERMS.md"
 require_file "LICENSE"
 
 # --- app-it-static plugin files (companion: serve a finished build) -----------
@@ -34,7 +45,9 @@ require_file "plugins/app-it-static/.claude-plugin/plugin.json"
 require_file "plugins/app-it-static/.codex-plugin/plugin.json"
 require_file "plugins/app-it-static/skills/app-it-static/SKILL.md"
 require_file "plugins/app-it-static/skills/app-it-static/templates/wrapper.swift"
+require_file "plugins/app-it-static/skills/app-it-static/templates/native-run-stub.c"
 require_file "plugins/app-it-static/skills/app-it-static/templates/static-server.py"
+require_file "plugins/app-it-static/skills/app-it-static/tests/test_static_server.py"
 require_file "plugins/app-it-static/skills/app-it-static/templates/run-template-static-server.sh"
 require_file "plugins/app-it-static/skills/app-it-static/templates/run-template-static-file.sh"
 require_file "plugins/app-it-static/skills/app-it-static/templates/desktop-build.sh"
@@ -56,6 +69,18 @@ win_plugin   = json.loads(Path("plugins/app-it-windows/.claude-plugin/plugin.jso
 win_codex    = json.loads(Path("plugins/app-it-windows/.codex-plugin/plugin.json").read_text())
 static_plugin = json.loads(Path("plugins/app-it-static/.claude-plugin/plugin.json").read_text())
 static_codex  = json.loads(Path("plugins/app-it-static/.codex-plugin/plugin.json").read_text())
+
+ROOT_URL = "https://github.com/Christian-Katzmann/app-it"
+PRIVACY_URL = f"{ROOT_URL}/blob/main/PRIVACY.md"
+TERMS_URL = f"{ROOT_URL}/blob/main/TERMS.md"
+WINDOWS_URL = f"{ROOT_URL}/blob/main/docs/WINDOWS.md"
+
+def assert_trust_fields(manifest, website_url=ROOT_URL):
+    interface = manifest.get("interface")
+    assert isinstance(interface, dict), f"{manifest['name']} missing interface object"
+    assert interface.get("websiteURL") == website_url, f"{manifest['name']} missing interface.websiteURL"
+    assert interface.get("privacyPolicyURL") == PRIVACY_URL, f"{manifest['name']} missing interface.privacyPolicyURL"
+    assert interface.get("termsOfServiceURL") == TERMS_URL, f"{manifest['name']} missing interface.termsOfServiceURL"
 
 # app-it plugin assertions
 assert plugin["name"] == "app-it"
@@ -86,6 +111,7 @@ assert "app-it-static" in codex_by_name, ".agents/plugins/marketplace.json missi
 assert codex_plugin["name"] == plugin["name"]
 assert codex_plugin["version"] == plugin["version"]
 assert codex_plugin["skills"] == "./skills/"
+assert_trust_fields(codex_plugin)
 assert codex_market["name"] == "app-it"
 assert codex_by_name["app-it"]["source"]["path"] == "./plugins/app-it"
 assert codex_by_name["app-it-windows"]["source"]["path"] == "./plugins/app-it-windows"
@@ -98,6 +124,7 @@ assert win_plugin["skills"] == "./skills/"
 assert win_codex["name"] == "app-it-windows"
 assert win_codex["version"] == win_plugin["version"]
 assert win_codex["skills"] == "./skills/"
+assert_trust_fields(win_codex, WINDOWS_URL)
 
 # app-it-static manifest assertions
 assert static_plugin["name"] == "app-it-static"
@@ -106,6 +133,7 @@ assert static_plugin["skills"] == "./skills/"
 assert static_codex["name"] == "app-it-static"
 assert static_codex["version"] == static_plugin["version"]
 assert static_codex["skills"] == "./skills/"
+assert_trust_fields(static_codex)
 PY
 
 if command -v claude >/dev/null 2>&1; then
@@ -117,6 +145,8 @@ fi
 
 for file in install.sh \
   scripts/test-fixtures.sh \
+  scripts/coverage.sh \
+  scripts/plugin-eval-score.sh \
   plugins/app-it/skills/app-it/templates/*.sh \
   plugins/app-it-static/skills/app-it-static/templates/*.sh; do
   bash -n "$file"
@@ -136,6 +166,11 @@ fi
 python3 -m py_compile plugins/app-it-static/skills/app-it-static/templates/static-server.py
 rm -rf plugins/app-it-static/skills/app-it-static/templates/__pycache__
 
+# Score-visible coverage evidence. This runs quick fixture inspections plus
+# static-server.py unit tests, then refreshes coverage-summary.json artifacts
+# under the plugin roots so plugin-eval can discover them.
+./scripts/coverage.sh
+
 plutil -lint plugins/app-it/skills/app-it/templates/info-plist-template.xml >/dev/null
 plutil -lint plugins/app-it-static/skills/app-it-static/templates/info-plist-template.xml >/dev/null
 
@@ -145,6 +180,12 @@ else
   echo "note: swiftc not found; skipping wrapper.swift typecheck"
 fi
 
+if command -v cc >/dev/null 2>&1; then
+  cc -fsyntax-only plugins/app-it/skills/app-it/templates/native-run-stub.c
+else
+  echo "note: cc not found; skipping native-run-stub.c syntax check"
+fi
+
 # --- Shared-template drift guard --------------------------------------------
 # app-it-static reuses five app-it templates byte-for-byte. Each plugin must be
 # self-contained for marketplace install, so the files are duplicated — but they
@@ -152,20 +193,33 @@ fi
 # two subtly different launchers.
 APP_IT_TPL="plugins/app-it/skills/app-it/templates"
 STATIC_TPL="plugins/app-it-static/skills/app-it-static/templates"
-for shared in wrapper.swift desktop-icons.sh desktop-icons-preview.sh desktop-install.sh info-plist-template.xml placeholder-icon-gen.sh; do
+for shared in wrapper.swift native-run-stub.c desktop-icons.sh desktop-icons-preview.sh desktop-install.sh info-plist-template.xml placeholder-icon-gen.sh; do
   if ! diff -q "$APP_IT_TPL/$shared" "$STATIC_TPL/$shared" >/dev/null; then
     fail "shared template drift: $shared differs between app-it and app-it-static (keep them byte-identical; edit app-it's copy and re-sync)"
   fi
 done
 
+# --- Cleanup ownership-gate invariant ---------------------------------------
+# Both quit scripts must gate every kill behind an ownership proof, so a stale or
+# reused server.pid can never TERM/KILL an unrelated process. The two quit
+# scripts are NOT byte-identical (single- vs multi-server), so the drift guard
+# above can't cover them — assert the ownership-gate markers are present in each.
+for quit in \
+  "$APP_IT_TPL/desktop-quit.sh" \
+  "$STATIC_TPL/desktop-quit.sh"; do
+  require_text "$quit" 'pid_identity_matches'
+  require_text "$quit" 'ownership_ok'
+done
+
 LOCAL_PATH_PATTERN="/"
 LOCAL_PATH_PATTERN="${LOCAL_PATH_PATTERN}Users/christiankatzmann"
-# campaigns/ is excluded: campaign markdown legitimately contains absolute paths
-# (the working-directory field in step prompts).
+# campaigns/ and reports/ are excluded: campaign prompts/state legitimately
+# contain absolute paths for unattended local automation.
 if grep -R "$LOCAL_PATH_PATTERN" . \
   --exclude-dir=.git \
   --exclude-dir=.tmp \
   --exclude-dir=campaigns \
+  --exclude-dir=reports \
   --exclude='validate.sh' \
   --exclude='*.png' >/dev/null; then
   fail "found local absolute path"
@@ -176,6 +230,16 @@ if grep -R "__APP_NAME__" README.md docs .claude-plugin .agents scripts \
   --exclude='validate.sh' >/dev/null 2>&1; then
   fail "found unresolved app template placeholder outside templates"
 fi
+
+# Public docs must keep the runtime-verification surface discoverable. The
+# behavior lives in templates and fixtures; these guards catch accidental doc
+# drift without making the prose long.
+require_text README.md 'desktop:doctor'
+require_text README.md 'desktop:verify'
+require_text README.md 'port_mode: "fixed"'
+require_text plugins/app-it/skills/app-it/templates/desktop-launcher.md.template './scripts/desktop-doctor.sh --json'
+require_text plugins/app-it/skills/app-it/templates/desktop-launcher.md.template './scripts/desktop-verify.sh --json'
+require_text plugins/app-it/skills/app-it/templates/desktop-launcher.md.template 'runtime.json'
 
 # --- SKILL.md frontmatter name must match each plugin's name -----------------
 grep -qx 'name: app-it' plugins/app-it/skills/app-it/SKILL.md \

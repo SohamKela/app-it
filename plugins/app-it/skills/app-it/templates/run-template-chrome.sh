@@ -4,7 +4,7 @@
 #   2. The app needs FSA real-I/O (handle.createWritable / handle.getFile),
 #      OR other Chromium-only Web APIs (Web USB / Bluetooth / HID / MIDI).
 #
-# Feature parity with run-template.sh (Swift): runtime port-fallback,
+# Feature parity with run-template.sh (Swift): runtime port-fallback/fixed mode,
 # server.port recording, two-stage readiness probe, expanded PATH,
 # pre-flight binary/deps checks, descendant-walk reattach gate.
 #
@@ -25,6 +25,7 @@ APP_NAME="__APP_NAME__"
 APP_SLUG="__APP_SLUG__"
 PROJECT_ROOT="__PROJECT_ROOT__"
 PREFERRED_PORT=__PORT__
+PORT_MODE="__PORT_MODE__"
 POLYFILL_PATH="__POLYFILL_PATH__"
 
 # Keep `$PORT` and other shell syntax literal until the daemon spawns below.
@@ -41,10 +42,21 @@ mkdir -p "$STATE_DIR" "$LOG_DIR"
 SERVER_LOG="$LOG_DIR/server.log"
 PID_FILE="$STATE_DIR/server.pid"
 PORT_FILE="$STATE_DIR/server.port"
+PID_ID_FILE="$STATE_DIR/server.identity"
 PROFILE="$STATE_DIR/BrowserProfile"
 mkdir -p "$PROFILE"
 
 KEEP_WARM="${APP_IT_CHROME_KEEP_WARM:-1}"
+
+case "$PORT_MODE" in
+    fallback|fixed) ;;
+    *)
+        MESSAGE="Invalid app-it port_mode: $PORT_MODE. Expected fallback or fixed. Rebuild after correcting scripts/app-it.config.json."
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+        exit 1
+        ;;
+esac
 
 # --- PATH augmentation -------------------------------------------------
 NVM_BIN=""
@@ -78,10 +90,106 @@ case "$START_COMMAND" in
 esac
 
 # --- Stale-state cleanup ----------------------------------------------
+pid_identity() {
+    local pid="${1:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}'
+}
+
+write_pid_identity() {
+    local pid="$1"
+    local file="$2"
+    local identity
+    identity="$(pid_identity "$pid" || true)"
+    if [ -n "$identity" ]; then
+        printf '%s\n' "$identity" > "$file"
+    else
+        rm -f "$file"
+    fi
+}
+
+pid_identity_state_valid() {
+    local pid="$1"
+    local file="$2"
+    local recorded current
+    [ -f "$file" ] || return 0  # legacy generated state; reattach still needs listener proof below.
+    recorded="$(sed -n '1p' "$file" 2>/dev/null || true)"
+    current="$(pid_identity "$pid" || true)"
+    [ -n "$recorded" ] && [ "$recorded" = "$current" ]
+}
+
+descendant_tree() {
+    local supervisor="${1:-}"
+    kill -0 "$supervisor" 2>/dev/null || return 0
+
+    local descendants="$supervisor"
+    local current="$supervisor"
+    local next_gen _pid
+    for _ in 1 2 3 4; do
+        next_gen=""
+        for _pid in $current; do
+            next_gen="$next_gen $(pgrep -P "$_pid" 2>/dev/null | tr '\n' ' ')"
+        done
+        [ -z "${next_gen// /}" ] && break
+        descendants="$descendants $next_gen"
+        current="$next_gen"
+    done
+    printf '%s\n' "$descendants"
+}
+
+pid_in_list() {
+    local needle="$1"
+    local haystack="$2"
+    case " $haystack " in
+        *" $needle "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+owned_listener_pids() {
+    local tree="$1"
+    local port="${2:-}"
+    [ -n "$tree" ] || return 0
+    [ -n "$port" ] || return 0
+
+    local listeners pid owned=""
+    listeners="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+    for pid in $listeners; do
+        if pid_in_list "$pid" "$tree"; then
+            owned="$owned $pid"
+        fi
+    done
+    printf '%s\n' "$owned"
+}
+
+stop_owned_runtime() {
+    local pid_file="$1"
+    local port_file="$2"
+    local identity_file="$3"
+    local recorded_pid recorded_port tree owned pids_to_stop
+    recorded_pid="$(sed -n '1p' "$pid_file" 2>/dev/null || true)"
+    recorded_port="$(sed -n '1p' "$port_file" 2>/dev/null || true)"
+
+    if kill -0 "$recorded_pid" 2>/dev/null; then
+        tree="$(descendant_tree "$recorded_pid")"
+        owned="$(owned_listener_pids "$tree" "$recorded_port")"
+        if { [ -f "$identity_file" ] && pid_identity_state_valid "$recorded_pid" "$identity_file"; } \
+            || { [ ! -f "$identity_file" ] && [ -n "${owned// /}" ]; }; then
+            pids_to_stop="$tree $owned"
+            kill -TERM $pids_to_stop 2>/dev/null || true
+        fi
+    fi
+
+    rm -f "$pid_file" "$port_file" "$identity_file"
+}
+
 if [ -f "$PID_FILE" ]; then
     EXPECTED_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null; then
-        rm -f "$PID_FILE" "$PORT_FILE"
+    if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null \
+        || ! pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
@@ -92,7 +200,7 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     EXPECTED_PORT="$(cat "$PORT_FILE")"
     REATTACH_OK=0
 
-    if kill -0 "$EXPECTED_PID" 2>/dev/null; then
+    if kill -0 "$EXPECTED_PID" 2>/dev/null && pid_identity_state_valid "$EXPECTED_PID" "$PID_ID_FILE"; then
         LISTENERS="$(lsof -ti tcp:"$EXPECTED_PORT" 2>/dev/null || true)"
         if [ -n "$LISTENERS" ]; then
             DESCENDANTS="$EXPECTED_PID"
@@ -127,22 +235,32 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ]; then
     if [ "$REATTACH_OK" = "1" ]; then
         CHOSEN_PORT="$EXPECTED_PORT"
     else
-        rm -f "$PID_FILE" "$PORT_FILE"
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     fi
 fi
 
 # --- Allocate a free port + start server ------------------------------
 if [ -z "$CHOSEN_PORT" ]; then
-    for p in $(seq "$PREFERRED_PORT" "$((PREFERRED_PORT + 50))"); do
-        if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
-            CHOSEN_PORT="$p"
-            break
+    if [ "$PORT_MODE" = "fixed" ]; then
+        if lsof -i tcp:"$PREFERRED_PORT" >/dev/null 2>&1; then
+            MESSAGE="Port $PREFERRED_PORT is busy and this launcher is configured with port_mode fixed. App It did not choose a fallback port because browser storage may be tied to http://localhost:$PREFERRED_PORT. Quit the process using that port, or change port/port_mode in scripts/app-it.config.json and rebuild."
+            printf '%s\n' "$MESSAGE" >&2
+            /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+            exit 1
         fi
-    done
+        CHOSEN_PORT="$PREFERRED_PORT"
+    else
+        for p in $(seq "$PREFERRED_PORT" "$((PREFERRED_PORT + 50))"); do
+            if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
+                CHOSEN_PORT="$p"
+                break
+            fi
+        done
 
-    if [ -z "$CHOSEN_PORT" ]; then
-        /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find a free port\" message \"Searched $PREFERRED_PORT–$((PREFERRED_PORT + 50)). Quit something using one of those ports and try again.\""
-        exit 1
+        if [ -z "$CHOSEN_PORT" ]; then
+            /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find a free port\" message \"Searched $PREFERRED_PORT–$((PREFERRED_PORT + 50)). Quit something using one of those ports and try again.\""
+            exit 1
+        fi
     fi
 
     cd "$PROJECT_ROOT"
@@ -155,15 +273,21 @@ if [ -z "$CHOSEN_PORT" ]; then
     SERVER_PID=$!
     echo "$SERVER_PID" > "$PID_FILE"
     echo "$CHOSEN_PORT" > "$PORT_FILE"
+    write_pid_identity "$SERVER_PID" "$PID_ID_FILE"
     disown "$SERVER_PID" 2>/dev/null || true
 
     URL="http://localhost:$CHOSEN_PORT"
 
     # Two-stage readiness probe (port-bound → any HTTP).
     READY=0
+    START_FAILURE=""
     for _ in $(seq 1 120); do
         if lsof -i tcp:"$CHOSEN_PORT" >/dev/null 2>&1; then
             READY=1
+            break
+        fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            START_FAILURE="The dev server process exited before binding to $URL."
             break
         fi
         sleep 0.5
@@ -182,8 +306,15 @@ if [ -z "$CHOSEN_PORT" ]; then
 
     if [ "$READY" != "1" ]; then
         TAIL="$(tail -40 "$SERVER_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 800)"
-        rm -f "$PID_FILE" "$PORT_FILE"
-        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"The dev server did not bind to $URL within 60s.\n\nLast log lines:\n$TAIL\""
+        rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
+        MODE_NOTE=""
+        if [ "$PORT_MODE" = "fixed" ]; then
+            MODE_NOTE="\n\nFixed-port mode did not fall back because browser storage may be tied to http://localhost:$PREFERRED_PORT."
+        fi
+        [ -n "$START_FAILURE" ] || START_FAILURE="The dev server did not bind to $URL within 60s."
+        MESSAGE="$START_FAILURE$MODE_NOTE\n\nLast log lines:\n$TAIL"
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"$MESSAGE\""
         exit 1
     fi
 fi
@@ -211,14 +342,7 @@ fi
 if [ "$KEEP_WARM" = "0" ]; then
     # Don't exec — wait for Chrome to exit, then tear down the daemon.
     "$CHROME_BIN" --app="$URL" --user-data-dir="$PROFILE"
-    if [ -f "$PID_FILE" ]; then
-        SUPER_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-        [ -n "$SUPER_PID" ] && kill -TERM "$SUPER_PID" 2>/dev/null || true
-        for p in $(lsof -ti tcp:"$CHOSEN_PORT" 2>/dev/null); do
-            kill -TERM "$p" 2>/dev/null || true
-        done
-        rm -f "$PID_FILE" "$PORT_FILE"
-    fi
+    stop_owned_runtime "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE"
     exit 0
 else
     # Default: leave the daemon warm; user runs desktop-quit.sh to stop it.

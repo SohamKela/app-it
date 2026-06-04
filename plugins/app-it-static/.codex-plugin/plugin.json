@@ -37,6 +37,9 @@
       "Serve this app's built output as a local macOS app without a dev server.",
       "Package this static site as a lightweight local macOS .app."
     ],
+    "websiteURL": "https://github.com/Christian-Katzmann/app-it",
+    "privacyPolicyURL": "https://github.com/Christian-Katzmann/app-it/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Christian-Katzmann/app-it/blob/main/TERMS.md",
     "brandColor": "#2F6FED"
   }
 }

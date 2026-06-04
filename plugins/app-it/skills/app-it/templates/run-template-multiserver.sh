@@ -23,6 +23,7 @@
 # Substituted by desktop-build.sh:
 #   __APP_NAME__, __APP_SLUG__, __PROJECT_ROOT__,
 #   __PORT__                    preferred frontend port
+#   __PORT_MODE__               fallback|fixed for the frontend origin
 #   __START_COMMAND__            frontend dev command (honors PORT)
 #   __BACKEND_PORT__             preferred backend port
 #   __BACKEND_START_COMMAND__    backend command (honors API_PORT)
@@ -34,6 +35,7 @@ APP_NAME="__APP_NAME__"
 APP_SLUG="__APP_SLUG__"
 PROJECT_ROOT="__PROJECT_ROOT__"
 PREFERRED_FE_PORT=__PORT__
+PORT_MODE="__PORT_MODE__"
 PREFERRED_BE_PORT=__BACKEND_PORT__
 POLYFILL_PATH="__POLYFILL_PATH__"
 
@@ -56,10 +58,23 @@ SERVER_LOG="$LOG_DIR/server.log"
 BACKEND_LOG="$LOG_DIR/backend.log"
 PID_FILE="$STATE_DIR/server.pid"
 PORT_FILE="$STATE_DIR/server.port"
+PID_ID_FILE="$STATE_DIR/server.identity"
 BACKEND_PID_FILE="$STATE_DIR/backend.pid"
 BACKEND_PORT_FILE="$STATE_DIR/backend.port"
+BACKEND_PID_ID_FILE="$STATE_DIR/backend.identity"
+RUNTIME_SUMMARY_FILE="$STATE_DIR/runtime.json"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+case "$PORT_MODE" in
+    fallback|fixed) ;;
+    *)
+        MESSAGE="Invalid app-it port_mode: $PORT_MODE. Expected fallback or fixed. Rebuild after correcting scripts/app-it.config.json."
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+        exit 1
+        ;;
+esac
 
 # --- PATH augmentation -------------------------------------------------
 NVM_BIN=""
@@ -94,14 +109,49 @@ case "$START_COMMAND$BACKEND_START_COMMAND" in
 esac
 
 # --- Stale-state cleanup ----------------------------------------------
+pid_identity() {
+    local pid="${1:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}'
+}
+
+write_pid_identity() {
+    local pid="$1"
+    local file="$2"
+    local identity
+    identity="$(pid_identity "$pid" || true)"
+    if [ -n "$identity" ]; then
+        printf '%s\n' "$identity" > "$file"
+    else
+        rm -f "$file"
+    fi
+}
+
+pid_identity_state_valid() {
+    local pid="$1"
+    local file="$2"
+    local recorded current
+    [ -f "$file" ] || return 0  # legacy generated state; reattach still needs listener proof below.
+    recorded="$(sed -n '1p' "$file" 2>/dev/null || true)"
+    current="$(pid_identity "$pid" || true)"
+    [ -n "$recorded" ] && [ "$recorded" = "$current" ]
+}
+
 for pf in "$PID_FILE" "$BACKEND_PID_FILE"; do
     if [ -f "$pf" ]; then
         EXPECTED_PID="$(cat "$pf" 2>/dev/null || true)"
-        if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null; then
-            rm -f "$pf"
+        case "$pf" in
+            "$PID_FILE") id_file="$PID_ID_FILE" ;;
+            *) id_file="$BACKEND_PID_ID_FILE" ;;
+        esac
+        if [ -z "$EXPECTED_PID" ] || ! kill -0 "$EXPECTED_PID" 2>/dev/null \
+            || ! pid_identity_state_valid "$EXPECTED_PID" "$id_file"; then
+            rm -f "$pf" "$id_file"
             case "$pf" in
-                *server.pid) rm -f "$PORT_FILE" ;;
-                *backend.pid) rm -f "$BACKEND_PORT_FILE" ;;
+                *server.pid) rm -f "$PORT_FILE" "$PID_ID_FILE" "$RUNTIME_SUMMARY_FILE" ;;
+                *backend.pid) rm -f "$BACKEND_PORT_FILE" "$BACKEND_PID_ID_FILE" "$RUNTIME_SUMMARY_FILE" ;;
             esac
         fi
     fi
@@ -137,6 +187,74 @@ descendant_holds_port() {
     return 1
 }
 
+write_runtime_summary() {
+    local status="$1"
+    local tmp="$RUNTIME_SUMMARY_FILE.tmp"
+    APP_IT_RUNTIME_APP_NAME="$APP_NAME" \
+    APP_IT_RUNTIME_APP_SLUG="$APP_SLUG" \
+    APP_IT_RUNTIME_STATUS="$status" \
+    APP_IT_RUNTIME_PORT_MODE="$PORT_MODE" \
+    APP_IT_RUNTIME_FE_PREFERRED="$PREFERRED_FE_PORT" \
+    APP_IT_RUNTIME_FE_PORT="${CHOSEN_FE_PORT:-}" \
+    APP_IT_RUNTIME_FE_PID="${FE_PID:-}" \
+    APP_IT_RUNTIME_BE_PREFERRED="$PREFERRED_BE_PORT" \
+    APP_IT_RUNTIME_BE_PORT="${CHOSEN_BE_PORT:-}" \
+    APP_IT_RUNTIME_BE_PID="${BE_PID:-}" \
+    APP_IT_RUNTIME_SERVER_LOG="$SERVER_LOG" \
+    APP_IT_RUNTIME_BACKEND_LOG="$BACKEND_LOG" \
+    /usr/bin/python3 - <<'PY' > "$tmp" && mv "$tmp" "$RUNTIME_SUMMARY_FILE" || rm -f "$tmp"
+import datetime
+import json
+import os
+import sys
+
+def as_int(value):
+    try:
+        return int(value) if value else None
+    except ValueError:
+        return None
+
+payload = {
+    "schema_version": 1,
+    "tool": "app-it.runtime",
+    "mode": "multi-server",
+    "status": os.environ["APP_IT_RUNTIME_STATUS"],
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "app": {
+        "name": os.environ["APP_IT_RUNTIME_APP_NAME"],
+        "slug": os.environ["APP_IT_RUNTIME_APP_SLUG"],
+    },
+    "ports": {
+        "frontend": {
+            "mode": os.environ["APP_IT_RUNTIME_PORT_MODE"],
+            "preferred": as_int(os.environ["APP_IT_RUNTIME_FE_PREFERRED"]),
+            "runtime": as_int(os.environ["APP_IT_RUNTIME_FE_PORT"]),
+        },
+        "backend": {
+            "preferred": as_int(os.environ["APP_IT_RUNTIME_BE_PREFERRED"]),
+            "runtime": as_int(os.environ["APP_IT_RUNTIME_BE_PORT"]),
+        },
+    },
+    "pids": {
+        "frontend": as_int(os.environ["APP_IT_RUNTIME_FE_PID"]),
+        "backend": as_int(os.environ["APP_IT_RUNTIME_BE_PID"]),
+    },
+    "logs": {
+        "frontend": os.environ["APP_IT_RUNTIME_SERVER_LOG"],
+        "backend": os.environ["APP_IT_RUNTIME_BACKEND_LOG"],
+    },
+}
+json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+sys.stdout.write("\n")
+PY
+}
+
+clear_runtime_state() {
+    rm -f "$PID_FILE" "$PORT_FILE" "$PID_ID_FILE" \
+        "$BACKEND_PID_FILE" "$BACKEND_PORT_FILE" "$BACKEND_PID_ID_FILE" \
+        "$RUNTIME_SUMMARY_FILE"
+}
+
 CHOSEN_FE_PORT=""
 CHOSEN_BE_PORT=""
 if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ] && [ -f "$BACKEND_PID_FILE" ] && [ -f "$BACKEND_PORT_FILE" ]; then
@@ -146,6 +264,8 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ] && [ -f "$BACKEND_PID_FILE" ] && [ 
     BE_PORT="$(cat "$BACKEND_PORT_FILE")"
 
     if kill -0 "$FE_PID" 2>/dev/null && kill -0 "$BE_PID" 2>/dev/null \
+        && pid_identity_state_valid "$FE_PID" "$PID_ID_FILE" \
+        && pid_identity_state_valid "$BE_PID" "$BACKEND_PID_ID_FILE" \
         && descendant_holds_port "$FE_PID" "$FE_PORT" \
         && descendant_holds_port "$BE_PID" "$BE_PORT"; then
         FE_STATUS="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "http://localhost:$FE_PORT" 2>/dev/null || true)"
@@ -156,19 +276,29 @@ if [ -f "$PID_FILE" ] && [ -f "$PORT_FILE" ] && [ -f "$BACKEND_PID_FILE" ] && [ 
     fi
 
     if [ -z "$CHOSEN_FE_PORT" ]; then
-        rm -f "$PID_FILE" "$PORT_FILE" "$BACKEND_PID_FILE" "$BACKEND_PORT_FILE"
+        clear_runtime_state
     fi
 fi
 
 # --- Allocate fresh ports + start both servers -------------------------
 if [ -z "$CHOSEN_FE_PORT" ]; then
     # Frontend port
-    for p in $(seq "$PREFERRED_FE_PORT" "$((PREFERRED_FE_PORT + 50))"); do
-        if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
-            CHOSEN_FE_PORT="$p"
-            break
+    if [ "$PORT_MODE" = "fixed" ]; then
+        if lsof -i tcp:"$PREFERRED_FE_PORT" >/dev/null 2>&1; then
+            MESSAGE="Frontend port $PREFERRED_FE_PORT is busy and this launcher is configured with port_mode fixed. App It did not choose a fallback frontend port because browser storage may be tied to http://localhost:$PREFERRED_FE_PORT. Quit the process using that port, or change port/port_mode in scripts/app-it.config.json and rebuild."
+            printf '%s\n' "$MESSAGE" >&2
+            /usr/bin/osascript -e "display alert \"$APP_NAME can't start\" message \"$MESSAGE\""
+            exit 1
         fi
-    done
+        CHOSEN_FE_PORT="$PREFERRED_FE_PORT"
+    else
+        for p in $(seq "$PREFERRED_FE_PORT" "$((PREFERRED_FE_PORT + 50))"); do
+            if ! lsof -i tcp:"$p" >/dev/null 2>&1; then
+                CHOSEN_FE_PORT="$p"
+                break
+            fi
+        done
+    fi
     # Backend port (skip the FE port if ranges overlap)
     for p in $(seq "$PREFERRED_BE_PORT" "$((PREFERRED_BE_PORT + 50))"); do
         if [ "$p" = "$CHOSEN_FE_PORT" ]; then
@@ -181,7 +311,9 @@ if [ -z "$CHOSEN_FE_PORT" ]; then
     done
 
     if [ -z "$CHOSEN_FE_PORT" ] || [ -z "$CHOSEN_BE_PORT" ]; then
-        /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find free ports\" message \"Searched FE [$PREFERRED_FE_PORT–$((PREFERRED_FE_PORT + 50))] and BE [$PREFERRED_BE_PORT–$((PREFERRED_BE_PORT + 50))].\""
+        FE_RANGE="[$PREFERRED_FE_PORT–$((PREFERRED_FE_PORT + 50))]"
+        [ "$PORT_MODE" = "fixed" ] && FE_RANGE="exactly $PREFERRED_FE_PORT"
+        /usr/bin/osascript -e "display alert \"$APP_NAME couldn't find free ports\" message \"Searched FE $FE_RANGE and BE [$PREFERRED_BE_PORT–$((PREFERRED_BE_PORT + 50))].\""
         exit 1
     fi
 
@@ -197,14 +329,28 @@ if [ -z "$CHOSEN_FE_PORT" ]; then
     BE_PID=$!
     echo "$BE_PID" > "$BACKEND_PID_FILE"
     echo "$CHOSEN_BE_PORT" > "$BACKEND_PORT_FILE"
+    write_pid_identity "$BE_PID" "$BACKEND_PID_ID_FILE"
     disown "$BE_PID" 2>/dev/null || true
 
     # Wait for the backend port to bind (don't curl — backends may not
     # serve a 200 on /).
+    BACKEND_READY=0
     for _ in $(seq 1 60); do
-        lsof -i tcp:"$CHOSEN_BE_PORT" >/dev/null 2>&1 && break
+        if lsof -i tcp:"$CHOSEN_BE_PORT" >/dev/null 2>&1; then
+            BACKEND_READY=1
+            break
+        fi
         sleep 0.5
     done
+    if [ "$BACKEND_READY" != "1" ]; then
+        BE_TAIL="$(tail -20 "$BACKEND_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 400)"
+        kill -TERM "$BE_PID" 2>/dev/null || true
+        clear_runtime_state
+        MESSAGE="Backend did not bind to runtime port :$CHOSEN_BE_PORT within 30s (preferred backend :$PREFERRED_BE_PORT; frontend preferred :$PREFERRED_FE_PORT, runtime :$CHOSEN_FE_PORT). The frontend was not started.\n\nBackend log:\n$BE_TAIL"
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"$MESSAGE\""
+        exit 1
+    fi
 
     # Start frontend with both PORT and API_PORT exported.
     if command -v setsid >/dev/null 2>&1; then
@@ -215,15 +361,21 @@ if [ -z "$CHOSEN_FE_PORT" ]; then
     FE_PID=$!
     echo "$FE_PID" > "$PID_FILE"
     echo "$CHOSEN_FE_PORT" > "$PORT_FILE"
+    write_pid_identity "$FE_PID" "$PID_ID_FILE"
     disown "$FE_PID" 2>/dev/null || true
 
     URL="http://localhost:$CHOSEN_FE_PORT"
 
     # Two-stage probe on the frontend.
     READY=0
+    START_FAILURE=""
     for _ in $(seq 1 120); do
         if lsof -i tcp:"$CHOSEN_FE_PORT" >/dev/null 2>&1; then
             READY=1
+            break
+        fi
+        if ! kill -0 "$FE_PID" 2>/dev/null; then
+            START_FAILURE="Frontend exited before binding to $URL."
             break
         fi
         sleep 0.5
@@ -243,13 +395,21 @@ if [ -z "$CHOSEN_FE_PORT" ]; then
     if [ "$READY" != "1" ]; then
         FE_TAIL="$(tail -20 "$SERVER_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 400)"
         BE_TAIL="$(tail -20 "$BACKEND_LOG" 2>/dev/null | sed 's/"/\\"/g' | tr '\n' ' ' | head -c 400)"
-        rm -f "$PID_FILE" "$PORT_FILE" "$BACKEND_PID_FILE" "$BACKEND_PORT_FILE"
-        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"Frontend did not bind to $URL within 60s.\n\nFrontend log:\n$FE_TAIL\n\nBackend log:\n$BE_TAIL\""
+        clear_runtime_state
+        MODE_NOTE=""
+        if [ "$PORT_MODE" = "fixed" ]; then
+            MODE_NOTE="\n\nFixed-port mode did not fall back because browser storage may be tied to http://localhost:$PREFERRED_FE_PORT."
+        fi
+        [ -n "$START_FAILURE" ] || START_FAILURE="Frontend did not bind to $URL within 60s."
+        MESSAGE="$START_FAILURE Preferred frontend :$PREFERRED_FE_PORT, runtime frontend :$CHOSEN_FE_PORT; preferred backend :$PREFERRED_BE_PORT, runtime backend :$CHOSEN_BE_PORT.$MODE_NOTE\n\nFrontend log:\n$FE_TAIL\n\nBackend log:\n$BE_TAIL"
+        printf '%s\n' "$MESSAGE" >&2
+        /usr/bin/osascript -e "display alert \"$APP_NAME failed to start\" message \"$MESSAGE\""
         exit 1
     fi
 fi
 
 URL="http://localhost:$CHOSEN_FE_PORT"
+write_runtime_summary "running"
 
 # --- Headless smoke seam (CI / SSH / --check) --------------------------
 # Both servers are up, daemonized, and recorded (server.{pid,port} +

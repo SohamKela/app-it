@@ -8,11 +8,18 @@
 #
 # Usage:
 #   ./scripts/inspect-static.sh
+#   /path/to/templates/inspect-static.sh
 #   APP_IT_PROJECT_ROOT=/path/to/repo ./scripts/inspect-static.sh
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="${APP_IT_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [ -n "${APP_IT_PROJECT_ROOT:-}" ]; then
+    ROOT="$APP_IT_PROJECT_ROOT"
+elif [ "$(basename "$SCRIPT_DIR")" = "templates" ] && [ -f "$SCRIPT_DIR/../SKILL.md" ]; then
+    ROOT="$(pwd)"
+else
+    ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$ROOT"
 
 sec() { echo; echo "=== $1 ==="; }

@@ -41,7 +41,7 @@ public sealed class HostConfig
 
     /// WebView2's isolated profile (cache, localStorage, cookies, IndexedDB)
     /// lives under the per-app state dir so apps never share a browser profile.
-    /// Documented in README.md. Default: %LOCALAPPDATA%\app-it\<slug>\WebView2.
+    /// Default: %LOCALAPPDATA%\app-it\<slug>\WebView2.
     public string WebView2UserDataDir => Path.Combine(StateDir, "WebView2");
 
     public static HostConfig Resolve(string[] args)

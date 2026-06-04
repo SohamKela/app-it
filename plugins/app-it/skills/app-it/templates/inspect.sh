@@ -8,12 +8,19 @@
 #
 # Usage:
 #   ./scripts/inspect.sh                  # report on current repo
+#   /path/to/templates/inspect.sh         # report on current working directory
 #   APP_IT_PROJECT_ROOT=/path/to/main \
 #       ./scripts/inspect.sh              # inspect a different path
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="${APP_IT_PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [ -n "${APP_IT_PROJECT_ROOT:-}" ]; then
+    ROOT="$APP_IT_PROJECT_ROOT"
+elif [ "$(basename "$SCRIPT_DIR")" = "templates" ] && [ -f "$SCRIPT_DIR/../SKILL.md" ]; then
+    ROOT="$(pwd)"
+else
+    ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 
 cd "$ROOT"
 
@@ -53,7 +60,7 @@ fi
 print_section "Dev / start script inventory"
 if [ -f "$ROOT/package.json" ]; then
     /usr/bin/python3 - <<'PY'
-import json, sys, re
+import json, os, re, sys
 try:
     with open("package.json") as f:
         pkg = json.load(f)
@@ -62,20 +69,72 @@ except Exception as e:
     sys.exit(0)
 scripts = pkg.get("scripts", {})
 matched = [(k, v) for k, v in scripts.items() if re.match(r"^(dev|start)(:|$)", k)]
+
+def package_manager():
+    declared = str(pkg.get("packageManager", ""))
+    if declared.startswith("pnpm@"):
+        return "pnpm"
+    if declared.startswith("yarn@"):
+        return "yarn"
+    if declared.startswith("bun@"):
+        return "bun"
+    if declared.startswith("npm@"):
+        return "npm"
+    if os.path.exists("pnpm-lock.yaml"):
+        return "pnpm"
+    if os.path.exists("yarn.lock"):
+        return "yarn"
+    if os.path.exists("bun.lockb") or os.path.exists("bun.lock"):
+        return "bun"
+    return "npm"
+
+PM = package_manager()
+
+def script_runner():
+    if PM == "pnpm":
+        return "pnpm run dev --"
+    if PM == "yarn":
+        return "yarn run dev --"
+    if PM == "bun":
+        return "bun run dev --"
+    return "npm run dev --"
+
+def exec_binary(binary, args):
+    if PM == "pnpm":
+        return f"pnpm exec {binary} {args}"
+    if PM == "yarn":
+        return f"yarn exec {binary} {args}"
+    if PM == "bun":
+        return f"bunx {binary} {args}"
+    return f"npm exec -- {binary} {args}"
+
+def has_port_literal(command):
+    return re.search(r"(^|\s)(--port(=|\s+)\d+|-p\s*\d+)", command) is not None
+
+def is_orchestrator(command):
+    return re.search(r"\b(concurrently|npm-run-all|turbo(\s+run)?|pnpm\s+-r|nx\s+run)\b", command) is not None
+
+NEXT_DIRECT = exec_binary("next", 'dev --hostname 127.0.0.1 --port "$PORT"')
+VITE_FLAGS = '--host 127.0.0.1 --port "$PORT" --strictPort'
+ASTRO_FLAGS = '--host 127.0.0.1 --port "$PORT"'
+
 if not matched:
     print("  (no dev/start scripts found)")
 for k, v in matched:
     flag_warn = ""
-    # Hardcoded -p / --port flag → launcher's PORT env will be ignored
-    if re.search(r"(--port|\s-p)\s+\d+", v):
-        flag_warn = "   ⚠ hardcoded port literal — bypass via direct binary or add dev:app-it"
-    # concurrently / npm-run-all / turbo / pnpm -r → orchestrator detected
-    elif re.search(r"\b(concurrently|npm-run-all|turbo run|pnpm -r)\b", v):
+    # Hardcoded -p / --port flag -> launcher's PORT env will be ignored.
+    if has_port_literal(v):
+        flag_warn = "   ⚠ hardcoded port literal — launcher PORT may be ignored; bypass via direct binary or add dev:app-it"
+    # concurrently / npm-run-all / turbo / pnpm -r -> orchestrator detected.
+    elif is_orchestrator(v):
         flag_warn = "   ✓ multi-process orchestrator — A3.1 candidate (reuse existing)"
+    elif re.search(r"(^|\s)next\s+dev\b", v):
+        flag_warn = "   ↳ Next direct-binary option avoids package-script flag-routing traps"
     print(f"  {k:<20} → {v}{flag_warn}")
 print()
 print(f"  package.json name:        {pkg.get('name', '(none)')}")
 print(f"  package.json displayName: {pkg.get('displayName', '(none)')}")
+print(f"  package manager:          {PM}")
 
 deps = {}
 for section in ("dependencies", "devDependencies", "optionalDependencies"):
@@ -85,19 +144,26 @@ def has(name):
     return name in deps
 
 recipes = []
+has_next_signal = has("next") or any(re.search(r"(^|\s)next\s+dev\b", value) for _, value in matched) or any(
+    os.path.exists(name) for name in ("next.config.ts", "next.config.js", "next.config.mjs")
+)
+if has_next_signal:
+    recipes.append(
+        f"Next.js — port 3000; direct binary '{NEXT_DIRECT}' when a script hardcodes flags or already wraps next dev"
+    )
 if has("vite") and has("react") and has("react-dom") and (
     has("@vitejs/plugin-react") or has("@vitejs/plugin-react-swc")
 ):
     recipes.append(
-        "Vite + React — port 5173; start_command '<pm> run dev -- --host 127.0.0.1 --port $PORT --strictPort'"
+        f"Vite + React — port 5173; start_command '{script_runner()} {VITE_FLAGS}'"
     )
 if has("@sveltejs/kit") and has("@sveltejs/vite-plugin-svelte") and has("svelte") and has("vite"):
     recipes.append(
-        "SvelteKit — port 5173; start_command '<pm> run dev -- --host 127.0.0.1 --port $PORT --strictPort'"
+        f"SvelteKit — port 5173; start_command '{script_runner()} {VITE_FLAGS}'"
     )
 if has("astro"):
     recipes.append(
-        "Astro — port 4321; start_command '<pm> run dev -- --host 127.0.0.1 --port $PORT'"
+        f"Astro — port 4321; start_command '{script_runner()} {ASTRO_FLAGS}'"
     )
 
 if recipes:
@@ -105,6 +171,15 @@ if recipes:
     print("  framework recipe candidates:")
     for recipe in recipes:
         print(f"    - {recipe}")
+if has_next_signal:
+    risky = [name for name, value in matched if re.search(r"(^|\s)next\s+dev\b", value) and (has_port_literal(value) or is_orchestrator(value) or re.search(r"[;&|]|--hostname|--port|-p\b", value))]
+    print()
+    print("  Next.js start-command hint:")
+    print(f"    - Next direct-binary recommendation: {NEXT_DIRECT}")
+    if risky:
+        print(f"    - Risky Next script shape in: {', '.join(risky)}. Prefer the direct binary or a clean dev:app-it script.")
+    else:
+        print("    - Plain next dev scripts are OK, but direct binary is safest when adding --hostname/--port.")
 PY
 fi
 
@@ -155,13 +230,117 @@ for install_dir in "$HOME/Applications/App It" "$HOME/Desktop/MyApps"; do
     done
 done
 if [ -z "$PORTS_FOUND" ]; then
-    echo "  (no app-it launchers found under ~/Applications/App It or legacy ~/Desktop/MyApps)"
+    echo "  (no app-it launchers found under the default install folders)"
+fi
+if [ -d "$HOME/Applications/App It" ] && [ -d "$HOME/Desktop/MyApps" ]; then
+    legacy_dupes=""
+    for legacy_app in "$HOME/Desktop/MyApps"/*.app; do
+        [ -d "$legacy_app" ] || continue
+        name="$(basename "$legacy_app")"
+        if [ -d "$HOME/Applications/App It/$name" ]; then
+            legacy_dupes="$legacy_dupes
+  $name"
+        fi
+    done
+    if [ -n "$legacy_dupes" ]; then
+        echo
+        echo "  ⚠ legacy duplicate app bundles found in ~/Desktop/MyApps and ~/Applications/App It:"
+        printf '%s\n' "$legacy_dupes" | head -10
+        echo "    Keep one install location. The default is ~/Applications/App It; Desktop is often iCloud-backed and can cause extra Gatekeeper/iCloud scanning."
+    fi
 fi
 
-print_section "Currently bound ports (3000–5200 range)"
-for p in 3000 3001 3002 3003 3004 3005 5173 5174 5175 8000 8080; do
+app_process_snapshot() {
+    command -v lsappinfo >/dev/null 2>&1 || return 0
+    /usr/bin/lsappinfo 2>/dev/null | awk '
+        function flush() {
+            if (name != "" && bid != "" && pid != "") {
+                print name "\t" bid "\t" pid "\tunknown"
+            }
+        }
+        /^[[:space:]]*[0-9]+\) "/ {
+            flush()
+            name=$0
+            sub(/^[^\"]*\"/, "", name)
+            sub(/\".*/, "", name)
+            bid=""
+            pid=""
+        }
+        /bundleID="/ {
+            bid=$0
+            sub(/^.*bundleID="/, "", bid)
+            sub(/".*/, "", bid)
+        }
+        /pid = / {
+            pid=$0
+            sub(/^.*pid = /, "", pid)
+            sub(/ .*/, "", pid)
+        }
+        END { flush() }
+    ' || true
+}
+
+print_section "Live appified app/window processes (diagnostic only)"
+APP_ROWS="$(app_process_snapshot)"
+WINDOW_FOUND=0
+APP_BUNDLES_FOUND=0
+for install_dir in "$HOME/Applications/App It" "$HOME/Desktop/MyApps"; do
+    [ -d "$install_dir" ] || continue
+    for app in "$install_dir"/*.app; do
+        [ -d "$app" ] || continue
+        plist="$app/Contents/Info.plist"
+        [ -f "$plist" ] || continue
+        bid="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$plist" 2>/dev/null || true)"
+        [ -n "$bid" ] || continue
+        APP_BUNDLES_FOUND=1
+        matches="$(printf '%s\n' "$APP_ROWS" | awk -F '\t' -v bid="$bid" '$2 == bid {print}')"
+        [ -n "$matches" ] || continue
+        while IFS="$(printf '\t')" read -r proc_name proc_bid proc_pid proc_windows; do
+            [ -n "$proc_pid" ] || continue
+            echo "  $(basename "$app" .app) — live PID $proc_pid, bundle $proc_bid"
+            echo "    unknown/probably foreign to this repo unless it is the app you are inspecting; inspect will not close or kill it"
+            WINDOW_FOUND=1
+        done <<< "$matches"
+    done
+done
+if [ "$APP_BUNDLES_FOUND" = "0" ]; then
+    echo "  (no installed app-it launchers found under the default install folders)"
+elif [ -z "$APP_ROWS" ]; then
+    echo "  (could not query live app/window processes — LaunchServices did not report visible apps)"
+elif [ "$WINDOW_FOUND" = "0" ]; then
+    echo "  (no live installed app-it app/window processes found)"
+fi
+
+CONFIG_PORTS="$(
+    /usr/bin/python3 - <<'PY' 2>/dev/null || true
+import json
+from pathlib import Path
+ports = []
+for rel in ("scripts/app-it.config.json", "app-it.config.json"):
+    path = Path(rel)
+    if not path.exists():
+        continue
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        continue
+    for app in payload.get("apps", []):
+        for key in ("port", "backend_port"):
+            value = app.get(key)
+            if value not in (None, ""):
+                ports.append(str(value))
+print(" ".join(ports))
+PY
+)"
+
+print_section "Currently bound ports (config + common dev ports)"
+SEEN_PORTS=""
+for p in $CONFIG_PORTS $PORTS_FOUND 3000 3001 3002 3003 3004 3005 5173 5174 5175 8000 8080; do
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    case " $SEEN_PORTS " in *" $p "*) continue ;; esac
+    SEEN_PORTS="$SEEN_PORTS $p"
     holder="$(lsof -i tcp:"$p" -sTCP:LISTEN -nP 2>/dev/null | awk 'NR>1 {printf "%s/%s ", $1, $2}' || true)"
-    [ -n "$holder" ] && echo "  :$p — $holder" || true
+    [ -n "$holder" ] && echo "  :$p — $holder (unknown/probably foreign unless it is one of this launcher’s recorded PIDs; inspect will not stop it)" || true
 done
 
 print_section "Toolchain availability"

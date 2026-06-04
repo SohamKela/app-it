@@ -38,6 +38,9 @@
       "Give this local app a Windows .exe launcher with its own icon and Taskbar entry.",
       "Scaffold a Windows desktop launcher for this project (beta)."
     ],
+    "websiteURL": "https://github.com/Christian-Katzmann/app-it/blob/main/docs/WINDOWS.md",
+    "privacyPolicyURL": "https://github.com/Christian-Katzmann/app-it/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Christian-Katzmann/app-it/blob/main/TERMS.md",
     "brandColor": "#2F6FED"
   }
 }

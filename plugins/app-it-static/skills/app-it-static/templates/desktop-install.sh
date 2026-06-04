@@ -13,6 +13,9 @@
 #      hash changed — Dock auto-respawns in <1s and the user only
 #      notices a Dock flicker on no-icon-change rebuilds, so we gate.
 #      This fixes "user replaced icon, Dock still shows old one."
+#   4. Skips unchanged installs unless APP_IT_FORCE_INSTALL=1 is set. Rewriting,
+#      touching, signing, and LaunchServices-registering an identical .app wakes
+#      macOS security/indexing work for no user-visible gain.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,6 +36,50 @@ if [ ! -d "$TARGET" ]; then
 fi
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+FINGERPRINT_DIR="$TARGET/.app-it-fingerprints"
+
+fingerprint_bundle() {
+    /usr/bin/python3 - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+h = hashlib.sha256()
+
+for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    dirnames.sort()
+    filenames.sort()
+    rel_dir = os.path.relpath(dirpath, root)
+    if rel_dir == ".":
+        rel_dir = ""
+    for name in filenames:
+        path = os.path.join(dirpath, name)
+        rel = os.path.join(rel_dir, name) if rel_dir else name
+        if rel.startswith("Contents/_CodeSignature/"):
+            continue
+        st = os.lstat(path)
+        mode = stat.S_IMODE(st.st_mode)
+        h.update(rel.encode("utf-8", "surrogateescape"))
+        h.update(b"\0")
+        h.update(str(mode).encode())
+        h.update(b"\0")
+        if stat.S_ISLNK(st.st_mode):
+            h.update(b"symlink\0")
+            h.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+            h.update(b"\0")
+            continue
+        if stat.S_ISREG(st.st_mode):
+            h.update(b"file\0")
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            h.update(b"\0")
+
+print(h.hexdigest())
+PY
+}
 
 shopt -s nullglob
 count=0
@@ -40,11 +87,23 @@ icon_changed=0
 for app in "$ROOT/desktop"/*.app; do
     name="$(basename "$app")"
     INSTALL_PATH="$TARGET/$name"
+    FINGERPRINT_FILE="$FINGERPRINT_DIR/$name.sha256"
+    SOURCE_FINGERPRINT="$(fingerprint_bundle "$app" 2>/dev/null || true)"
 
     # Capture old icon hash (if any) so we can decide whether to kill Dock.
     OLD_HASH=""
     if [ -f "$INSTALL_PATH/Contents/Resources/AppIcon.icns" ]; then
         OLD_HASH="$(shasum -a 256 "$INSTALL_PATH/Contents/Resources/AppIcon.icns" 2>/dev/null | awk '{print $1}')"
+    fi
+
+    if [ "${APP_IT_FORCE_INSTALL:-0}" != "1" ] \
+        && [ -n "$SOURCE_FINGERPRINT" ] \
+        && [ -d "$INSTALL_PATH" ] \
+        && [ -f "$FINGERPRINT_FILE" ] \
+        && [ "$(cat "$FINGERPRINT_FILE" 2>/dev/null || true)" = "$SOURCE_FINGERPRINT" ]; then
+        echo "Already current: $INSTALL_PATH"
+        count=$((count + 1))
+        continue
     fi
 
     rm -rf "$INSTALL_PATH"
@@ -72,6 +131,11 @@ for app in "$ROOT/desktop"/*.app; do
     if [ -x "$LSREGISTER" ]; then
         "$LSREGISTER" -u "$app" >/dev/null 2>&1 || true
         "$LSREGISTER" -f "$INSTALL_PATH" >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "$SOURCE_FINGERPRINT" ]; then
+        mkdir -p "$FINGERPRINT_DIR"
+        printf '%s\n' "$SOURCE_FINGERPRINT" > "$FINGERPRINT_FILE"
     fi
 
     echo "Installed: $INSTALL_PATH"

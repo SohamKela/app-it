@@ -1,0 +1,8 @@
+{
+  "name": "fixed-port-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node stub-server.js --port $PORT"
+  }
+}
