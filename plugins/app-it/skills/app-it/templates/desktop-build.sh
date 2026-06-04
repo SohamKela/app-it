@@ -22,7 +22,8 @@
 #       "version": "0.1.0",
 #       "polyfill_path": "",
 #       "backend_port": null,                  // optional, A3.2 multi-server
-#       "backend_start_command": null          // optional, A3.2 multi-server
+#       "backend_start_command": null,         // optional, A3.2 multi-server
+#       "external_url": ""                     // optional URL-only app, e.g. published Claude Artifact
 #     }
 #   ]
 # }
@@ -44,24 +45,28 @@ CONFIG_FILE="$SCRIPT_DIR/app-it.config.json"
 APPS=()
 if [ -f "$CONFIG_FILE" ]; then
     # Convert each app to pipe-delimited internal record.
-    # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
+    # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command|external_url
     while IFS= read -r line; do
         [ -n "$line" ] && APPS+=("$line")
     done < <(/usr/bin/python3 - "$CONFIG_FILE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
+def text(value):
+    return "" if value is None else str(value)
 for a in cfg.get("apps", []):
+    external_url = a.get("external_url") or a.get("artifact_url") or a.get("url") or ""
     fields = [
-        a.get("name", ""),
-        a.get("slug", ""),
-        str(a.get("port", "")),
-        a.get("start_command", ""),
-        a.get("bundle_id", ""),
-        a.get("version", "0.1.0"),
-        a.get("polyfill_path", ""),
-        str(a.get("backend_port") or ""),
-        a.get("backend_start_command") or "",
+        text(a.get("name", "")),
+        text(a.get("slug", "")),
+        text(a.get("port", "")),
+        text(a.get("start_command", "")),
+        text(a.get("bundle_id", "")),
+        text(a.get("version", "0.1.0")),
+        text(a.get("polyfill_path", "")),
+        text(a.get("backend_port") or ""),
+        text(a.get("backend_start_command") or ""),
+        text(external_url),
     ]
     # Reject any field containing pipe — would corrupt parsing.
     if any("|" in f for f in fields):
@@ -75,8 +80,8 @@ else
     echo "      Recommended: copy templates/app-it.config.example.json to scripts/." >&2
     APPS=(
       # Replace these with your apps. One line per app.
-      # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command
-      "__APP_NAME__|__APP_SLUG__|__PORT__|__START_COMMAND__|__BUNDLE_ID__|__VERSION__|__POLYFILL_PATH_ENTRY__||"
+      # Format: name|slug|port|start_command|bundle_id|version|polyfill_path|backend_port|backend_start_command|external_url
+      "__APP_NAME__|__APP_SLUG__|__PORT__|__START_COMMAND__|__BUNDLE_ID__|__VERSION__|__POLYFILL_PATH_ENTRY__|||"
     )
 fi
 
@@ -93,7 +98,7 @@ fi
 # so the safest answer is to never use the prefix at all.
 USER_PREFIX="com.$(id -un | tr 'A-Z' 'a-z')."
 for entry in "${APPS[@]}"; do
-    IFS='|' read -r _ _ _ _ BID _ _ _ _ <<<"$entry"
+    IFS='|' read -r _ _ _ _ BID _ _ _ _ _ <<<"$entry"
     BID_LOWER="$(echo "$BID" | tr 'A-Z' 'a-z')"
     case "$BID_LOWER" in
         "$USER_PREFIX"*)
@@ -116,14 +121,17 @@ WRAPPER_BUILD="$ROOT/assets/icons/build/wrapper"
 
 if [ "$LAUNCHER_MODE" = "swift" ]; then
     RUN_TEMPLATE_SINGLE="$SCRIPT_DIR/run-template.sh"
+    RUN_TEMPLATE_URL="$SCRIPT_DIR/run-template-url.sh"
 else
     RUN_TEMPLATE_SINGLE="$SCRIPT_DIR/run-template-chrome.sh"
+    RUN_TEMPLATE_URL="$SCRIPT_DIR/run-template-url-chrome.sh"
 fi
 RUN_TEMPLATE_MULTI="$SCRIPT_DIR/run-template-multiserver.sh"
 
-if [ ! -f "$RUN_TEMPLATE_SINGLE" ] || [ ! -f "$PLIST_TEMPLATE" ]; then
+if [ ! -f "$RUN_TEMPLATE_SINGLE" ] || [ ! -f "$RUN_TEMPLATE_URL" ] || [ ! -f "$PLIST_TEMPLATE" ]; then
     echo "Missing templates next to this script. Expected:" >&2
     echo "  $RUN_TEMPLATE_SINGLE" >&2
+    echo "  $RUN_TEMPLATE_URL" >&2
     echo "  $PLIST_TEMPLATE" >&2
     exit 1
 fi
@@ -196,7 +204,7 @@ PY
 
 # --- Build each app -----------------------------------------------------
 for entry in "${APPS[@]}"; do
-    IFS='|' read -r APP_NAME APP_SLUG PORT START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START_COMMAND <<<"$entry"
+    IFS='|' read -r APP_NAME APP_SLUG PORT START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START_COMMAND EXTERNAL_URL <<<"$entry"
     POLYFILL_PATH="${POLYFILL_PATH//@ROOT@/$ROOT}"
 
     APP_DIR="$ROOT/desktop/${APP_NAME}.app"
@@ -207,14 +215,20 @@ for entry in "${APPS[@]}"; do
     echo "Building: $APP_DIR"
     mkdir -p "$MACOS" "$RESOURCES"
 
-    # Pick template — multi-server if backend fields are populated and
-    # the multi-server template exists.
-    if [ -n "$BACKEND_PORT" ] && [ -n "$BACKEND_START_COMMAND" ] && [ -f "$RUN_TEMPLATE_MULTI" ]; then
+    # Pick template. URL-only apps (Claude Artifact links, hosted dashboards)
+    # do not start a local daemon. Multi-server still wins only for local apps.
+    if [ -n "$EXTERNAL_URL" ]; then
+        SELECTED_RUN_TEMPLATE="$RUN_TEMPLATE_URL"
+        IS_MULTI=0
+        IS_URL=1
+    elif [ -n "$BACKEND_PORT" ] && [ -n "$BACKEND_START_COMMAND" ] && [ -f "$RUN_TEMPLATE_MULTI" ]; then
         SELECTED_RUN_TEMPLATE="$RUN_TEMPLATE_MULTI"
         IS_MULTI=1
+        IS_URL=0
     else
         SELECTED_RUN_TEMPLATE="$RUN_TEMPLATE_SINGLE"
         IS_MULTI=0
+        IS_URL=0
     fi
 
     substitute "$PLIST_TEMPLATE" \
@@ -223,7 +237,14 @@ for entry in "${APPS[@]}"; do
         "__VERSION__=$VERSION" \
         > "$CONTENTS/Info.plist"
 
-    if [ "$IS_MULTI" = "1" ]; then
+    if [ "$IS_URL" = "1" ]; then
+        substitute "$SELECTED_RUN_TEMPLATE" \
+            "__APP_NAME__=$APP_NAME" \
+            "__APP_SLUG__=$APP_SLUG" \
+            "__APP_URL__=$EXTERNAL_URL" \
+            "__POLYFILL_PATH__=$POLYFILL_PATH" \
+            > "$MACOS/run"
+    elif [ "$IS_MULTI" = "1" ]; then
         substitute "$SELECTED_RUN_TEMPLATE" \
             "__APP_NAME__=$APP_NAME" \
             "__APP_SLUG__=$APP_SLUG" \

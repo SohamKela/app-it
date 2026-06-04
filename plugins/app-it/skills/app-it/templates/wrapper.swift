@@ -2,7 +2,7 @@
 // .app bundle owns its window (and therefore its Dock icon, activation, and
 // single-instance semantics).
 //
-// Usage: wrapper <url> [app-name] [port] [pid-file] [polyfill-js-path]
+// Usage: wrapper <url> [app-name] [port] [pid-file] [polyfill-js-path] [allow-external-hosts]
 //   url               — http(s) URL to load (typically http://localhost:PORT)
 //   app-name          — window title and Dock badge (e.g. "Momó Studio")
 //   port              — optional, used by Cmd+Q to sweep stragglers off the dev port
@@ -19,6 +19,10 @@
 //                       The polyfill is the agent's responsibility — see the
 //                       skill's `fsa-polyfill-template.js` for a worked
 //                       example. Pass an empty string to skip injection.
+//   allow-external-hosts — optional literal. Used by URL-only launchers such as
+//                       Claude Artifact wrappers, where auth, iframes, and API
+//                       bridges must remain inside the hosted web app instead
+//                       of being kicked out to the default browser.
 //
 // Build: swiftc -O wrapper.swift -o <out> -framework Cocoa -framework WebKit
 //
@@ -52,6 +56,7 @@ final class AppDelegate: NSObject,
     private let port: Int?
     private let pidFilePath: String?
     private let polyfillJSPath: String?
+    private let allowExternalHosts: Bool
     private var window: NSWindow!
     private var webView: WKWebView!
     private var quittingViaWindowClose = false
@@ -64,13 +69,15 @@ final class AppDelegate: NSObject,
         appName: String,
         port: Int?,
         pidFilePath: String?,
-        polyfillJSPath: String?
+        polyfillJSPath: String?,
+        allowExternalHosts: Bool
     ) {
         self.url = url
         self.appName = appName
         self.port = port
         self.pidFilePath = pidFilePath
         self.polyfillJSPath = polyfillJSPath
+        self.allowExternalHosts = allowExternalHosts
         super.init()
     }
 
@@ -291,6 +298,10 @@ final class AppDelegate: NSObject,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         guard let target = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+        if allowExternalHosts {
             decisionHandler(.allow)
             return
         }
@@ -851,13 +862,14 @@ final class FindBar: NSView, NSTextFieldDelegate, NSSearchFieldDelegate {
 let arguments = CommandLine.arguments
 guard arguments.count >= 2, let url = URL(string: arguments[1]) else {
     FileHandle.standardError.write(
-        Data("usage: wrapper <url> [app-name] [port] [pid-file] [polyfill-js-path]\n".utf8))
+        Data("usage: wrapper <url> [app-name] [port] [pid-file] [polyfill-js-path] [allow-external-hosts]\n".utf8))
     exit(2)
 }
 let appName = arguments.count >= 3 ? arguments[2] : "App"
 let port = arguments.count >= 4 ? Int(arguments[3]) : nil
 let pidFilePath = arguments.count >= 5 && !arguments[4].isEmpty ? arguments[4] : nil
 let polyfillJSPath = arguments.count >= 6 && !arguments[5].isEmpty ? arguments[5] : nil
+let allowExternalHosts = arguments.count >= 7 && arguments[6] == "allow-external-hosts"
 
 let app = NSApplication.shared
 let delegate = AppDelegate(
@@ -865,7 +877,8 @@ let delegate = AppDelegate(
     appName: appName,
     port: port,
     pidFilePath: pidFilePath,
-    polyfillJSPath: polyfillJSPath
+    polyfillJSPath: polyfillJSPath,
+    allowExternalHosts: allowExternalHosts
 )
 app.delegate = delegate
 app.setActivationPolicy(.regular)

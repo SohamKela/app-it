@@ -1,7 +1,7 @@
 ---
 name: app-it
 description: >-
-  Turn a project into one or more real macOS Dock-launchable `.app` bundles.
+  Turn a project or hosted Claude Artifact URL into one or more real macOS Dock-launchable `.app` bundles.
   Use when the user asks to make something clickable from the Dock, package it
   as an app, give it an icon, or put it in MyApps. Chooses sensible
   packaging defaults, creates repeatable scripts, installs to
@@ -17,7 +17,7 @@ description: >-
   `--fix-safe` that only cleans up app-it's own generated state.
 ---
 
-# app-it — Make any project launchable from the Dock
+# app-it — Make any project or hosted Artifact launchable from the Dock
 
 ## Core principles
 
@@ -29,6 +29,7 @@ description: >-
 6. **The `.app` keeps its own Dock icon.** This means the foreground process must be ours, not Chrome's. Default launcher is a small Swift `WKWebView` shell that the skill ships and compiles. Chrome `--app=` is a documented fallback only.
 7. **Trust disk over docs.** `CLAUDE.md`, `AGENTS.md`, `README.md` may be stale, template-copied from another project, or describe an intended state not yet implemented. Always verify project type from `package.json` + config files. If docs and disk disagree, trust disk and note the discrepancy in the report.
 8. **Runtime truth beats build-time guess.** The launcher's port may not be the configured port. The recorded supervisor PID may not be the listener. The verification target is the runtime artifact, not the build-time intent. The templates encode this; the agent must respect it during verification.
+9. **Claude Artifact auth stays with Claude.** If an artifact uses Claude's hosted runtime APIs (`window.claude`, `window.storage`, MCP prompts, or Claude-provided auth), package a published/shared `claude.ai` artifact URL. Do not copy cookies, sessions, API keys, or private Claude auth into a local JSX bundle. Each user signs into Claude inside the app and uses their own plan.
 
 The user almost never wants:
 - A full Electron migration of their existing app.
@@ -40,9 +41,10 @@ The user almost never wants:
 ## When to use this skill
 
 Trigger on any of: "launch from Dock", "give this an icon", "make this an app", "app-it", "appify", "dockify", ".app for this", "in /Applications", "in MyApps", "clickable launcher", "desktop shortcut for this project", "package as a desktop app".
+Also trigger on: "Claude Artifact as an app", "app for this artifact", "package this artifact", "make this Claude artifact clickable", or a `claude.ai` artifact URL.
 
 Do **not** use this skill for:
-- Distributing the app to other users (signing, notarization, App Store, auto-update). Mention as a known limitation.
+- General signed distribution to other users (notarization, App Store, auto-update, installer). Mention as a known limitation. Claude Artifact URL wrappers are a narrow exception: they can be zipped/shared as ad-hoc-signed local bundles, but recipients must trust the bundle and sign into Claude with their own account.
 - Native rewrites or feature additions.
 - Generic "build" or "deploy" requests unrelated to a desktop launcher.
 
@@ -59,6 +61,8 @@ templates/
   run-template.sh                  # bash launcher → execs wrapper (Swift mode)
   run-template-chrome.sh           # bash launcher → Chrome --app (fallback / FSA real-I/O)
   run-template-multiserver.sh      # bash launcher for cohabiting FE+BE
+  run-template-url.sh              # URL-only Swift launcher (hosted Claude Artifacts, dashboards)
+  run-template-url-chrome.sh       # URL-only Chrome fallback
   desktop-build.sh                 # builds the bundles, compiles wrapper (universal)
   desktop-icons.sh                 # generates AppIcon.icns from a source PNG/SVG
   desktop-icons-preview.sh         # renders a source icon at real Dock sizes + plain-language warnings (HTML + PNG)
@@ -82,7 +86,7 @@ Phases run in order. Don't skip ahead.
 
 ### Phase 1 — Inspect (read-only)
 
-**Run `templates/inspect.sh` first.** It emits a one-page report covering worktree status, project type, dev scripts with hardcoded `-p` flags, framework port literals, FSA usage, sibling-app port collisions, runtime-binary availability, and gitignored data paths the launcher will need at runtime. Read its output before answering anything below.
+**Run `templates/inspect.sh` first.** It emits a one-page report covering worktree status, project type, dev scripts with hardcoded `-p` flags, framework port literals, Claude Artifact signals, FSA usage, sibling-app port collisions, runtime-binary availability, and gitignored data paths the launcher will need at runtime. Read its output before answering anything below.
 
 Then answer all of these. Do not modify files.
 
@@ -90,8 +94,8 @@ Then answer all of these. Do not modify files.
    - **(a) Bypass worktree, write to main checkout** — preferred when app-it is dev-tooling unrelated to the worktree's WIP branch. Cleanest baked path; mixes branch hygiene only if the user is mid-commit on main.
    - **(b) `APP_IT_PROJECT_ROOT` env override** — when app-it scripts should ship as a reviewable diff on the worktree's feature branch. Build from worktree, point baked path at main checkout via env.
    - **(c) Bake worktree + document rebuild** — only when the user explicitly opts in. The baked path will go away when the worktree is pruned; user must re-run `desktop:build` from main afterward. Do not let agents fall into this by default.
-2. **Project type** (verify from disk, not from `CLAUDE.md`/`README.md`). Look for: `package.json` (with `dependencies`/`scripts`), `next.config.*`, `vite.config.*`, `tauri.conf.json`/`src-tauri/`, `electron.*`/`main.js`/`electron-builder.*`, `pyproject.toml`/`requirements.txt`, `index.html` at root, `Cargo.toml`, `Gemfile`, `manifest.json` + service worker.
-3. **Runtime shape per app.** Static / single-server / multi-server cohabiting / one-shot script / already-a-desktop-binary.
+2. **Project type** (verify from disk, not from `CLAUDE.md`/`README.md`). Look for: `package.json` (with `dependencies`/`scripts`), `next.config.*`, `vite.config.*`, `tauri.conf.json`/`src-tauri/`, `electron.*`/`main.js`/`electron-builder.*`, `pyproject.toml`/`requirements.txt`, `index.html` at root, `Cargo.toml`, `Gemfile`, `manifest.json` + service worker, and `claude.ai` artifact URLs.
+3. **Runtime shape per app.** Static / single-server / multi-server cohabiting / one-shot script / already-a-desktop-binary / URL-only hosted app.
 4. **Dev-script choice.** Inventory all `dev:*` and `start:*` scripts (`inspect.sh` does this). Default to `dev` (canonical full-fidelity). Prefer a `dev:bypass` / `dev:no-db` / `dev:offline` variant when the canonical `dev` requires external services that won't be reachable from a Dock click. Surface alternatives in the final report so the user can flip without rebuilding from scratch.
 5. **Hardcoded port literals.** If a dev script contains `-p 3002` or `--port 5173`, the framework will ignore the launcher's `PORT` env. Either swap for a clean direct-binary call (`pnpm exec next dev`) or add a new `dev:app-it` script without the literal. For Vite specifically, prefer `START_COMMAND="npm run dev -- --port \$PORT"` over editing `vite.config.ts` (CLI flag wins over config literal in vanilla single-server projects).
 6. **Existing desktop config.** If `electron`, `electron-builder`, `tauri`, `nw.js`, `pkg`, or `nativefier` is already present — strong signal, use it (Strategy B).
@@ -100,36 +104,46 @@ Then answer all of these. Do not modify files.
 9. **Browser-API gotchas.** Two-stage FSA grep:
    - Stage 1: `grep -RnIE "showDirectoryPicker|FileSystemDirectoryHandle|FileSystemFileHandle" --include='*.{ts,tsx,js,jsx}' src/` — any usage at all → polyfill candidate.
    - Stage 2: `grep -RnIE "\.createWritable\(|\.getFile\(\)|writable\.write\(" --include='*.{ts,tsx,js,jsx}' src/ services/` — real-I/O usage → polyfill *cannot* satisfy this; route to A1 chrome-fallback (Chrome supports FSA natively) or Strategy D.
-10. **Toolchain availability.** `command -v swiftc`. If absent, A1 chrome-fallback; document the warts. The build script auto-detects and falls back.
-11. **Asset inventory per app.** Find candidate icon sources (see [Asset discovery](#asset-discovery)). Parse `manifest.json` first when present. Reject icons whose filenames mirror `src/features/<name>/` — those are content, not the app's own mark.
-12. **Project-name resolution.** When folder name, `package.json` `name`, `metadata.json` `name`, in-app titles, and recent commit subjects disagree, score by priority: recent commit subjects (user's actual vocabulary) → `displayName` → human-looking `metadata.json` `name` → folder humanized → `package.json` `name` last and only if not slug-shaped. **Reject** `package.json` names containing `---` or matching scaffold patterns (`vite-project`, `next-app`). Surface conflicts in the report so the user can override.
-13. **Bundle-ID prefix.** Mandate `com.user.<slug>` as the default. **Reject** `com.$(id -un).*` — LaunchServices treats it as a personal-team developer prefix and refuses unsigned bundles with `_LSOpenURLs… error -600 / procNotFound`. Country-coded reverse-DNS (`dk.example.app`) is also a clean choice for projects with a real domain.
-14. **Install destination.** `~/Applications/App It/` (auto-create if missing) unless the user explicitly requested `~/Desktop/MyApps/`, `/Applications/`, or another path.
-15. **Project root path.** Resolve to a *persistent* absolute path (post-worktree-strategy from step 1). The build script bakes this; it cannot be re-derived from `$0` after install.
+10. **Claude Artifact gotchas.**
+    - Published/shared `claude.ai` artifact URL → Strategy E URL-only. Set `"external_url"` or `"artifact_url"` in `scripts/app-it.config.json`.
+    - Raw `.jsx`/`.tsx` artifact source with no `window.claude`/`window.storage` usage → ordinary local web app; use Vite/React or static strategy as appropriate.
+    - Raw source with `window.claude`, `window.storage`, MCP prompt calls, or Claude-provided auth → do **not** shim local credentials or shared API keys. Tell the user this requires a published/shared Claude Artifact URL so each recipient uses their own Claude login/plan.
+11. **Toolchain availability.** `command -v swiftc`. If absent, A1 chrome-fallback; document the warts. The build script auto-detects and falls back.
+12. **Asset inventory per app.** Find candidate icon sources (see [Asset discovery](#asset-discovery)). Parse `manifest.json` first when present. Reject icons whose filenames mirror `src/features/<name>/` — those are content, not the app's own mark.
+13. **Project-name resolution.** When folder name, `package.json` `name`, `metadata.json` `name`, in-app titles, hosted artifact titles, and recent commit subjects disagree, score by priority: recent commit subjects (user's actual vocabulary) → `displayName` → human-looking `metadata.json` `name` or artifact title → folder humanized → `package.json` `name` last and only if not slug-shaped. **Reject** `package.json` names containing `---` or matching scaffold patterns (`vite-project`, `next-app`). Surface conflicts in the report so the user can override.
+14. **Bundle-ID prefix.** Mandate `com.user.<slug>` as the default. **Reject** `com.$(id -un).*` — LaunchServices treats it as a personal-team developer prefix and refuses unsigned bundles with `_LSOpenURLs… error -600 / procNotFound`. Country-coded reverse-DNS (`dk.example.app`) is also a clean choice for projects with a real domain.
+15. **Install destination.** `~/Applications/App It/` (auto-create if missing) unless the user explicitly requested `~/Desktop/MyApps/`, `/Applications/`, or another path.
+16. **Project root path.** Resolve to a *persistent* absolute path (post-worktree-strategy from step 1). URL-only apps are self-contained after build and do not need the source repo at runtime, but the build/install scripts still live in the source repo.
 
 ### Phase 2 — Decide
 
 For **each app** detected, pick **one** strategy:
 
 ```
-Existing Electron/Tauri/NW.js config for this app?
-├── YES → Strategy B
+Published/shared Claude Artifact URL?
+├── YES → Strategy E (URL-only hosted app)
 └── NO →
-    Hard requirement for native menu bar / tray / file associations / shipping signed?
-    ├── YES → Strategy D (Tauri wrapper)
+    Raw Claude Artifact source uses window.claude/window.storage/MCP/auth?
+    ├── YES → blocked until user provides/publishes a Claude Artifact URL
     └── NO →
-        FSA real-I/O usage? (createWritable / getFile-then-blob)
-        ├── YES → A1 chrome-fallback (Chrome supports FSA natively, zero rewrite)
+        Existing Electron/Tauri/NW.js config for this app?
+        ├── YES → Strategy B
         └── NO →
-            Other Chromium-only Web APIs needed? (Web USB/Bluetooth/HID/MIDI)
-            ├── YES → A1 chrome-fallback
+            Hard requirement for native menu bar / tray / file associations / shipping signed?
+            ├── YES → Strategy D (Tauri wrapper)
             └── NO →
-                Static built bundle, no server?
-                ├── YES → A2
+                FSA real-I/O usage? (createWritable / getFile-then-blob)
+                ├── YES → A1 chrome-fallback (Chrome supports FSA natively, zero rewrite)
                 └── NO →
-                    Cohabiting frontend + backend?
-                    ├── YES → A3 (one .app starts both)
-                    └── NO → A1 native (DEFAULT)
+                    Other Chromium-only Web APIs needed? (Web USB/Bluetooth/HID/MIDI)
+                    ├── YES → A1 chrome-fallback
+                    └── NO →
+                        Static built bundle, no server?
+                        ├── YES → A2
+                        └── NO →
+                            Cohabiting frontend + backend?
+                            ├── YES → A3 (one .app starts both)
+                            └── NO → A1 native (DEFAULT)
 ```
 
 Within Strategy A1, choose:
@@ -138,6 +152,7 @@ Within Strategy A1, choose:
 - **A2 Static** — built site with `index.html`, no server.
 - **A3 Multi-server** — one user-facing app with cohabiting backend + frontend.
 - **A4 CLI script** — script with no UI; produces a `.app` that spawns Terminal. Flag loudly in the report.
+- **E URL-only hosted app** — no local server. Use for published/shared Claude Artifact URLs and similar hosted apps where auth/API behavior belongs to the host. The Swift wrapper passes `allow-external-hosts` so Claude login redirects, artifact iframes, and AI API bridge traffic stay inside the app window. Chrome fallback exists but keeps the usual Chrome `--app` caveats.
 
 PWA install (formerly Strategy C) is no longer a primary path — when the project has a manifest, **also** ship a Strategy A `.app` and mention the PWA install option in the doc.
 
@@ -168,19 +183,21 @@ Touch as few project files as possible. Allowed additions:
       "start_command": "npm run dev -- --port $PORT",
       "bundle_id": "com.user.momo-studio",
       "version": "0.1.0",
-      "polyfill_path": ""
+      "polyfill_path": "",
+      "external_url": ""
     }
   ]
 }
 ```
 
-For A3 multi-server, add `"backend_port"` and `"backend_start_command"`. The build script reads this file; `desktop-quit.sh` reads it too — no APPS-table drift between scripts. (For backward compat, the build script also accepts a bash `APPS=(...)` array if no JSON is present.)
+For A3 multi-server, add `"backend_port"` and `"backend_start_command"`. For Strategy E URL-only apps, set `"external_url"` (or alias `"artifact_url"` / `"url"`) and leave port/start fields empty or `null`; the build script ignores local-server fields when a URL is set. The build script reads this file; `desktop-quit.sh` reads it too — no APPS-table drift between scripts. (For backward compat, the build script also accepts a bash `APPS=(...)` array if no JSON is present.)
 
 **Substitution placeholders** baked into the run-script at build time:
 - `__APP_NAME__`, `__APP_SLUG__` — display name (may be non-ASCII), file-safe slug.
 - `__PROJECT_ROOT__` — absolute path to repo, baked at build time.
 - `__PORT__` — *preferred* port. Launcher tries first, scans upward for free port if taken, records actual runtime port to `~/Library/Application Support/app-it/<slug>/server.port`.
 - `__START_COMMAND__` — must honor `PORT` env. See [Framework PORT cheat sheet](#framework-port-cheat-sheet).
+- `__APP_URL__` — Strategy E URL-only launch target. Must be `http(s)`. Used instead of `__PROJECT_ROOT__`, `__PORT__`, and `__START_COMMAND__`.
 - `__BUNDLE_ID__`, `__VERSION__` — reverse-DNS bundle id, marketing version.
 - `__POLYFILL_PATH__` — absolute path to a JS polyfill file (empty if none).
 
@@ -206,6 +223,7 @@ script arguments.
 Never:
 - Modify app business-logic source code.
 - Add runtime dependencies for Strategy A.
+- Shim Claude Artifact APIs locally with shared API keys, copied cookies, or another user's Claude session. Published/shared artifact URL or no Claude-plan API support.
 - Hardcode user-home paths anywhere except as defaults with override.
 - Spawn a Terminal window the user has to keep open (A4 only, flagged).
 - Write a launcher that requires the dev server to already be running.
@@ -214,6 +232,14 @@ Never:
 ### Phase 4 — Verify (mandatory)
 
 For each `.app`, run the checks below. **Three buckets** — never claim success in a bucket the agent can't actually verify.
+
+For Strategy E URL-only apps, rows 3–4 and 7–9 are `n/a — no local server`.
+Programmatic verification is: `APP_IT_SMOKE=1 desktop/<App>.app/Contents/MacOS/run`
+prints the configured URL, no `server.port` is written, `Contents/MacOS/run`
+contains the URL and `allow-external-hosts` (Swift mode), and rows 1–2 still
+pass. GUI verification is opening the installed app, signing into Claude if
+needed, and confirming the hosted artifact runs in-window. Do not `curl`
+private artifact URLs as proof; auth-protected artifacts may correctly redirect.
 
 | # | Check | Programmatic | Idiom |
 |---|---|---|---|
@@ -379,6 +405,44 @@ Adapt `run-template.sh`: drop the daemon-server block, point the URL at `file://
 
 > For a *finished/buildable* app whose whole point is to skip the dev server, the **`app-it-static`** companion skill is the better tool: it detects the build command and output dir, builds once, and serves the result from a tiny static server or `file://` — with a proper snapshot/`desktop:rebuild` model. Use it when static serving is the goal, not just an A2 corner case.
 
+## Strategy E — URL-only hosted app
+
+Use when the app already lives at a hosted URL and the host must keep owning
+auth/runtime behavior. The primary case is a published/shared Claude Artifact:
+Claude provides the artifact sandbox, AI bridge, storage, login, and plan usage.
+`app-it` wraps the URL; it does not recreate Claude's runtime locally.
+
+Config shape:
+
+```json
+{
+  "apps": [
+    {
+      "name": "Research Helper",
+      "slug": "research-helper",
+      "port": null,
+      "start_command": "",
+      "bundle_id": "com.user.research-helper",
+      "version": "0.1.0",
+      "polyfill_path": "",
+      "artifact_url": "https://claude.ai/..."
+    }
+  ]
+}
+```
+
+Use `run-template-url.sh` by setting `external_url`, `artifact_url`, or `url`.
+It compiles the normal Swift wrapper, passes no port/pid, and adds
+`allow-external-hosts` so Claude auth redirects, hosted iframe traffic, and the
+artifact's Claude API bridge stay in-window. `APP_IT_SMOKE=1` prints the URL and
+exits without opening a GUI; no server is started and no `server.port` is
+recorded.
+
+Distribution boundary: a URL-only `.app` is self-contained enough to zip/share,
+but it is still ad-hoc signed and not notarized. Recipients must trust the
+bundle, launch it, and sign into Claude with their own account. Never ship API
+keys, cookies, or copied Claude authentication.
+
 ## A3 — Multi-server cohabiting app
 
 Three sub-strategies — pick by project context:
@@ -495,6 +559,7 @@ If `handle.getDirectoryHandle('subdir', {create: true})` is expected to land rea
 Hard-won from real-project iteration. Do not rediscover these:
 
 - **Don't use Chrome `--app=` as the default for vanilla web apps** — it steals the Dock icon, breaks single-instance, is slower. Use Swift. Exception: chrome-fallback IS the right answer when the app needs Chromium-only APIs (FSA real-I/O, Web USB/Bluetooth/HID/MIDI).
+- **Don't turn Claude Artifact source into a credential shim.** Raw JSX that calls `window.claude`, `window.storage`, MCP prompts, or Claude-hosted auth depends on Claude's artifact runtime. The supported answer is Strategy E with a published/shared `claude.ai` artifact URL. Never distribute API keys, session cookies, local Claude auth files, or another user's authenticated browser profile.
 - **Don't passive-attach to externally-running servers.** If something is already on `$PREFERRED_PORT`, scan upward and start your own. Even when the existing server *seems* like it must be ours (matching path, matching framework), the cost of being wrong is showing the user another project's UI inside your app's window. The descendant-walk reattach gate enforces this; don't replace it with a bare `curl 200 → attach`.
 - **Don't use AppleScript / `osascript` to dedup Chrome `--app=` windows.** Fragile, requires Accessibility permission.
 - **Don't touch `WKPreferences` private SPI for autoplay.** Keys throw `NSUnknownKeyException`, crash happens in `applicationDidFinishLaunching` before the WebView is constructed. The fix in `wrapper.swift` is a synthetic `NSEvent` mouseDown/mouseUp pair after first navigation — that counts as a real platform gesture.
@@ -640,7 +705,7 @@ Picked: "<chosen>". Sources surveyed: <folder>, <package.json name>, <metadata.j
 - **<AppName 1>** — <runtime shape, port, start command>
 
 **3. Strategy chosen per app:**
-- <AppName 1>: <A1 native | A1 chrome-fallback | A2 static | A3.1 reuse-orchestrator | A3.2 multi-server-template | A3.3 refuse-on-collision | A4 CLI | B | D> — <one-line name>
+- <AppName 1>: <A1 native | A1 chrome-fallback | A2 static | A3.1 reuse-orchestrator | A3.2 multi-server-template | A3.3 refuse-on-collision | A4 CLI | E URL-only | B | D> — <one-line name>
 
 **4. Why these are the lowest-effort robust approaches:**
 <2–4 sentences. What was ruled out and why. Mention if Chrome was ruled out due to Dock-icon/single-instance issues, or chosen because of FSA real-I/O / Chromium-only APIs.>
@@ -717,6 +782,8 @@ Replace `assets/<slug>-icon.png`, optionally `pnpm desktop:icons:preview:<app>` 
 | `vite.config.*` + proxy block | A3.2 | Make ports env-driven (3 vite-config edits + 1 server-entry edit). |
 | `svelte.config.*` + `@sveltejs/kit` | A1 native | SvelteKit recipe: Vite-backed dev server, use `--port "$PORT" --strictPort`; do not treat adapter choice as static unless using app-it-static. |
 | `astro.config.*` + `astro` dependency | A1 native | Astro recipe: default preferred port 4321, `START_COMMAND="npm run dev -- --host 127.0.0.1 --port \"\$PORT\""`. |
+| Published/shared `claude.ai` Artifact URL | E URL-only | Set `artifact_url`/`external_url`; no local server, no shared keys, each user signs into Claude with their own plan. |
+| Raw Artifact JSX with `window.claude` / `window.storage` | blocked until hosted | Publish/share the artifact in Claude and package the URL; do not shim Claude auth into local source. |
 | `concurrently` / `npm-run-all -p` / `turbo run dev` in `dev` | A3.1 | Reuse orchestrator as single START_COMMAND. |
 | `apps/web` + `apps/api` (cohabiting, no orchestrator) | A3.2 | Multi-server template. |
 | `apps/web` + `apps/studio` (separate) | A1 native × 2 | Two `.app`s. |

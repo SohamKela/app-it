@@ -5,7 +5,7 @@ Click an icon in `~/Applications/App It/` (or its Dock Stack) to launch.
 ## First launch
 
 1. Right-click the app icon and choose **Open**, then click **Open** in the dialog. macOS remembers and skips this on subsequent launches (Gatekeeper, unsigned bundle).
-2. The first cold start takes 5–15 s while the dev server compiles.
+2. The first cold start takes 5–15 s while the dev server compiles. URL-only apps (for example, Claude Artifact wrappers) do not compile locally; first launch is just WebKit startup plus sign-in/network time.
 3. If a "couldn't be opened" alert appears citing the dev server, open `~/Library/Logs/app-it/<slug>/server.log`. The alert quotes the tail; the full log usually shows the cause.
 
 ## Apps
@@ -20,6 +20,7 @@ Each `.app` runs as a real macOS app with its own Dock icon and its own window �
 The launcher is **persistent** — designed for daily use, not single-shot demos.
 
 - **First click after boot:** 5–15 s for the dev server cold start.
+- **URL-only apps:** no local server is started. The app opens the hosted URL directly; Cmd+Q closes the wrapper only.
 - **Closing the window with the red X does NOT kill the dev server.** It stays warm. Click the icon again and the window opens within ~250 ms.
 - **Cmd+Q (or right-click → Quit in the Dock) DOES kill the server.** Full-shutdown path — use when you actually want everything to stop.
 - **Re-clicking the icon while the window is open** brings the existing window forward. No second window.
@@ -97,6 +98,7 @@ dependencies, or config. For multi-app projects, pass a slug to pick one:
 Per app, logs live under `~/Library/Logs/app-it/<slug>/`:
 - `server.log` — dev-server output. If startup fails, an alert quotes the tail.
 - `backend.log` — *(multi-server only)* backend service output.
+- URL-only apps do not have a server log unless a previous non-URL build wrote one.
 
 Per app, runtime state lives under `~/Library/Application Support/app-it/<slug>/`:
 - `server.port` — the actual runtime port (may differ from the configured port if collision-fallback kicked in).
@@ -125,3 +127,4 @@ desktop/<App Name>.app/
 - **Persistent server.** Closing the window leaves the dev server running. That's intentional — it's why the second launch is fast — but it means `lsof -i :<port>` keeps showing bindings until you Cmd+Q the app, run `desktop-quit.sh`, or reboot.
 - **WebKit, not Chromium.** If you need Chrome devtools or a Chromium-only feature, point a regular browser tab at the runtime URL.
 - **Distribution to other users not supported.** Unsigned, no notarization, no auto-update. Your other Mac counts (universal arm64+x86_64 binary), but a colleague needs to right-click → Open the first time too.
+- **Claude Artifact wrappers.** Sharing the `.app` shares only the hosted URL wrapper, not Claude credentials. Each recipient signs into Claude and uses their own plan.

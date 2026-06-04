@@ -29,10 +29,12 @@ if [ -f "$CONFIG_FILE" ]; then
 import json, re, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
+def text(value):
+    return "" if value is None else str(value)
 for a in cfg.get("apps", []):
-    name = a.get("name", "")
+    name = a.get("name") or ""
     slug = a.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    print(f'{name}|{slug}|{a.get("port","")}|{a.get("backend_port") or ""}')
+    print(f'{name}|{slug}|{text(a.get("port",""))}|{text(a.get("backend_port") or "")}')
 PY
 )
 else
@@ -137,10 +139,11 @@ for entry in "${APPS[@]}"; do
 done
 
 # Native WebKit wrapper windows — match by bundle-name path (.app component
-# is ASCII even when bundle name has accents) plus the app name in argv.
+# is ASCII even when bundle name has accents) plus the app name in argv. This
+# covers both localhost launchers and URL-only launchers (Claude Artifact links).
 for entry in "${APPS[@]}"; do
     IFS='|' read -r APP_NAME APP_SLUG _ _ <<<"$entry"
-    for p in $(pgrep -f "MacOS/wrapper http://localhost:" 2>/dev/null); do
+    for p in $(pgrep -f "MacOS/wrapper " 2>/dev/null); do
         cmdline="$(ps -o command= -p "$p" 2>/dev/null || true)"
         if echo "$cmdline" | grep -qF "$APP_NAME"; then
             kill -TERM "$p" 2>/dev/null || true

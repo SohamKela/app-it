@@ -104,13 +104,17 @@ try:
     cfg = json.load(open(sys.argv[1]))
 except Exception as e:
     sys.stderr.write(f"could not parse app-it.config.json: {e}\n"); sys.exit(3)
+def text(value):
+    return "" if value is None else str(value)
 for a in cfg.get("apps", []):
-    name = a.get("name", "")
+    name = a.get("name") or ""
     slug = a.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    external_url = a.get("external_url") or a.get("artifact_url") or a.get("url") or ""
     fields = [
-        name, slug, str(a.get("port", "")), a.get("start_command", ""),
-        a.get("bundle_id", ""), a.get("version", "0.1.0"), a.get("polyfill_path", ""),
-        str(a.get("backend_port") or ""), a.get("backend_start_command") or "",
+        text(name), text(slug), text(a.get("port", "")), text(a.get("start_command", "")),
+        text(a.get("bundle_id", "")), text(a.get("version", "0.1.0")), text(a.get("polyfill_path", "")),
+        text(a.get("backend_port") or ""), text(a.get("backend_start_command") or ""),
+        text(external_url),
     ]
     print("|".join(f.replace("|", " ") for f in fields))
 PY
@@ -135,7 +139,9 @@ else
     SELECTED="${APPS[0]}"
 fi
 
-IFS='|' read -r APP_NAME APP_SLUG PORT START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START <<<"$SELECTED"
+IFS='|' read -r APP_NAME APP_SLUG PORT START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START EXTERNAL_URL <<<"$SELECTED"
+IS_URL_ONLY=0
+[ -n "$EXTERNAL_URL" ] && IS_URL_ONLY=1
 
 # --- Paths (mirror run-template.sh / desktop-quit.sh conventions) ------------
 STATE_DIR="$HOME/Library/Application Support/app-it/$APP_SLUG"
@@ -189,6 +195,9 @@ printf '%sapp-it doctor%s — %s%s%s\n' "$C_BOLD" "$C_OFF" "$C_BOLD" "$APP_NAME"
 printf '  %sslug%s        %s\n' "$C_DIM" "$C_OFF" "$APP_SLUG"
 printf '  %sbundle id%s   %s\n' "$C_DIM" "$C_OFF" "${BUNDLE_ID:-(unset)}"
 printf '  %sproject%s     %s\n' "$C_DIM" "$C_OFF" "$ROOT"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    printf '  %surl%s         %s\n' "$C_DIM" "$C_OFF" "$EXTERNAL_URL"
+fi
 printf '  %ssubject%s     %s\n' "$C_DIM" "$C_OFF" "${APP_UNDER_TEST:-<no .app built yet>}"
 if [ "${#APPS[@]}" -gt 1 ] && [ -z "$SELECTOR" ]; then
     others="$(for e in "${APPS[@]}"; do IFS='|' read -r _ s _ <<<"$e"; printf '%s ' "$s"; done)"
@@ -202,7 +211,7 @@ ok "scripts/app-it.config.json present and parses"
 
 # Placeholder leakage — an unsubstituted __PLACEHOLDER__ means a broken build.
 leaked=""
-for v in "$APP_NAME" "$APP_SLUG" "$PORT" "$BUNDLE_ID" "$START_COMMAND"; do
+for v in "$APP_NAME" "$APP_SLUG" "$PORT" "$BUNDLE_ID" "$START_COMMAND" "$EXTERNAL_URL"; do
     case "$v" in *__*__*) leaked="$leaked $v" ;; esac
 done
 if [ -n "$leaked" ]; then
@@ -222,11 +231,19 @@ case "$bid_lc" in
     *)               warn "bundle id '$BUNDLE_ID' is not reverse-DNS shaped (expected something like com.user.$APP_SLUG)" ;;
 esac
 
-# Preferred port sanity.
-case "$PORT" in
-    ''|*[!0-9]*) warn "preferred port '$PORT' is not a plain number" ;;
-    *)           ok "preferred port :$PORT" ;;
-esac
+if [ "$IS_URL_ONLY" = "1" ]; then
+    case "$EXTERNAL_URL" in
+        http://*|https://*) ok "URL-only launcher: $EXTERNAL_URL" ;;
+        *)                 fail "URL-only launcher has a non-http(s) URL: $EXTERNAL_URL" ;;
+    esac
+    info "no local dev server configured; this app loads the hosted URL directly"
+else
+    # Preferred port sanity.
+    case "$PORT" in
+        ''|*[!0-9]*) warn "preferred port '$PORT' is not a plain number" ;;
+        *)           ok "preferred port :$PORT" ;;
+    esac
+fi
 
 # =============================================================================
 section "Installed bundle"
@@ -308,78 +325,84 @@ section "Runtime — port, server, ownership"
 RUNTIME_PORT=""; [ -f "$PORT_FILE" ] && RUNTIME_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
 REC_PID="";      [ -f "$PID_FILE" ]  && REC_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
 
-# Preferred vs runtime port.
-if [ -z "$RUNTIME_PORT" ]; then
-    info "not currently running (no recorded runtime port). Preferred is :$PORT."
-elif [ "$RUNTIME_PORT" = "$PORT" ]; then
-    ok "runtime port :$RUNTIME_PORT matches the preferred port"
-else
-    info "running on :$RUNTIME_PORT, preferred :$PORT — fell back (a sibling app or another process probably held :$PORT at launch)"
-fi
-
-# Stale PID — low severity, because the launcher self-heals on the next click.
 PID_ALIVE=0
-if [ -n "$REC_PID" ]; then
-    if kill -0 "$REC_PID" 2>/dev/null; then
-        PID_ALIVE=1
-        ok "recorded supervisor PID $REC_PID is alive"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    ok "URL-only app; no local daemon, runtime port, or server ownership to check"
+else
+    # Preferred vs runtime port.
+    if [ -z "$RUNTIME_PORT" ]; then
+        info "not currently running (no recorded runtime port). Preferred is :$PORT."
+    elif [ "$RUNTIME_PORT" = "$PORT" ]; then
+        ok "runtime port :$RUNTIME_PORT matches the preferred port"
     else
-        warn "stale server.pid: recorded PID $REC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
+        info "running on :$RUNTIME_PORT, preferred :$PORT — fell back (a sibling app or another process probably held :$PORT at launch)"
     fi
-fi
 
-# Does the running server actually belong to THIS launcher? Same descendant-walk
-# the launcher uses to decide whether to reattach. Honest "probably" when the
-# ownership tree can't confirm it.
-if [ -n "$RUNTIME_PORT" ]; then
-    LISTENERS="$(lsof -ti tcp:"$RUNTIME_PORT" 2>/dev/null || true)"
-    if [ -z "$LISTENERS" ]; then
-        if [ "$PID_ALIVE" = "1" ]; then
-            warn "supervisor PID $REC_PID is alive but nothing is listening on :$RUNTIME_PORT — server is probably still starting, or crashed after spawn (check the log)"
+    # Stale PID — low severity, because the launcher self-heals on the next click.
+    if [ -n "$REC_PID" ]; then
+        if kill -0 "$REC_PID" 2>/dev/null; then
+            PID_ALIVE=1
+            ok "recorded supervisor PID $REC_PID is alive"
         else
-            info "nothing is listening on :$RUNTIME_PORT (app is stopped)"
+            warn "stale server.pid: recorded PID $REC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
         fi
-    elif [ "$PID_ALIVE" = "1" ]; then
-        TREE=" $(walk_descendants "$REC_PID") "
-        owned=0
-        for p in $LISTENERS; do case "$TREE" in *" $p "*) owned=1; break ;; esac; done
-        if [ "$owned" = "1" ]; then
-            ok "the process on :$RUNTIME_PORT belongs to this launcher (in PID $REC_PID's tree)"
-            code="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "http://localhost:$RUNTIME_PORT" 2>/dev/null || true)"
-            if [ -n "$code" ] && [ "$code" != "000" ]; then ok "server responds on http://localhost:$RUNTIME_PORT (HTTP $code)"
-            else warn "server is bound to :$RUNTIME_PORT but not answering HTTP yet — probably mid-startup"; fi
-        else
-            warn "a process holds :$RUNTIME_PORT but it is probably NOT this launcher's server (not in PID $REC_PID's tree) — could be a foreign app or a stale listener"
-        fi
-    else
-        warn "the recorded supervisor is gone yet :$RUNTIME_PORT is held — probably a stale or foreign process; the launcher will scan past it on next click"
     fi
-fi
 
-# Backend (A3.2 multi-server) — only when the config declares one.
-if [ -n "$BACKEND_PORT" ]; then
-    BRUNTIME=""; [ -f "$BPORT_FILE" ] && BRUNTIME="$(cat "$BPORT_FILE" 2>/dev/null || true)"
-    if [ -n "$BRUNTIME" ] && lsof -ti tcp:"$BRUNTIME" >/dev/null 2>&1; then ok "backend listening on :$BRUNTIME"
-    elif [ -n "$BACKEND_PORT" ]; then info "multi-server app; backend not currently listening (preferred :$BACKEND_PORT)"; fi
-fi
+    # Does the running server actually belong to THIS launcher? Same descendant-walk
+    # the launcher uses to decide whether to reattach. Honest "probably" when the
+    # ownership tree can't confirm it.
+    if [ -n "$RUNTIME_PORT" ]; then
+        LISTENERS="$(lsof -ti tcp:"$RUNTIME_PORT" 2>/dev/null || true)"
+        if [ -z "$LISTENERS" ]; then
+            if [ "$PID_ALIVE" = "1" ]; then
+                warn "supervisor PID $REC_PID is alive but nothing is listening on :$RUNTIME_PORT — server is probably still starting, or crashed after spawn (check the log)"
+            else
+                info "nothing is listening on :$RUNTIME_PORT (app is stopped)"
+            fi
+        elif [ "$PID_ALIVE" = "1" ]; then
+            TREE=" $(walk_descendants "$REC_PID") "
+            owned=0
+            for p in $LISTENERS; do case "$TREE" in *" $p "*) owned=1; break ;; esac; done
+            if [ "$owned" = "1" ]; then
+                ok "the process on :$RUNTIME_PORT belongs to this launcher (in PID $REC_PID's tree)"
+                code="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "http://localhost:$RUNTIME_PORT" 2>/dev/null || true)"
+                if [ -n "$code" ] && [ "$code" != "000" ]; then ok "server responds on http://localhost:$RUNTIME_PORT (HTTP $code)"
+                else warn "server is bound to :$RUNTIME_PORT but not answering HTTP yet — probably mid-startup"; fi
+            else
+                warn "a process holds :$RUNTIME_PORT but it is probably NOT this launcher's server (not in PID $REC_PID's tree) — could be a foreign app or a stale listener"
+            fi
+        else
+            warn "the recorded supervisor is gone yet :$RUNTIME_PORT is held — probably a stale or foreign process; the launcher will scan past it on next click"
+        fi
+    fi
 
-# Launch-time binary preflight — catches "works in my terminal, dead from Dock"
-# because Finder launches with a bare PATH. Uses the launcher's augmented PATH.
-CMD="$START_COMMAND"
-case "$CMD" in cd\ *\ \&\&\ *) CMD="${CMD#* && }" ;; esac
-FIRST_BIN="$(printf '%s' "$CMD" | awk '{print $1}')"
-if [ -n "$FIRST_BIN" ]; then
-    if PATH="$LAUNCHER_PATH" command -v "$FIRST_BIN" >/dev/null 2>&1; then
-        ok "start command's binary '$FIRST_BIN' resolves on the launcher's PATH"
-    else
-        warn "start command's binary '$FIRST_BIN' is NOT on the launcher's PATH — the app would fail from a Dock click even if it works in your terminal"
+    # Backend (A3.2 multi-server) — only when the config declares one.
+    if [ -n "$BACKEND_PORT" ]; then
+        BRUNTIME=""; [ -f "$BPORT_FILE" ] && BRUNTIME="$(cat "$BPORT_FILE" 2>/dev/null || true)"
+        if [ -n "$BRUNTIME" ] && lsof -ti tcp:"$BRUNTIME" >/dev/null 2>&1; then ok "backend listening on :$BRUNTIME"
+        elif [ -n "$BACKEND_PORT" ]; then info "multi-server app; backend not currently listening (preferred :$BACKEND_PORT)"; fi
+    fi
+
+    # Launch-time binary preflight — catches "works in my terminal, dead from Dock"
+    # because Finder launches with a bare PATH. Uses the launcher's augmented PATH.
+    CMD="$START_COMMAND"
+    case "$CMD" in cd\ *\ \&\&\ *) CMD="${CMD#* && }" ;; esac
+    FIRST_BIN="$(printf '%s' "$CMD" | awk '{print $1}')"
+    if [ -n "$FIRST_BIN" ]; then
+        if PATH="$LAUNCHER_PATH" command -v "$FIRST_BIN" >/dev/null 2>&1; then
+            ok "start command's binary '$FIRST_BIN' resolves on the launcher's PATH"
+        else
+            warn "start command's binary '$FIRST_BIN' is NOT on the launcher's PATH — the app would fail from a Dock click even if it works in your terminal"
+        fi
     fi
 fi
 
 # =============================================================================
 section "State & logs"
 if [ -d "$STATE_DIR" ]; then info "state dir: $STATE_DIR"; else info "no state dir yet (app hasn't been launched)"; fi
-if [ -f "$SERVER_LOG" ]; then
+if [ "$IS_URL_ONLY" = "1" ]; then
+    info "URL-only launcher: no server log is expected"
+elif [ -f "$SERVER_LOG" ]; then
     sz="$(wc -c < "$SERVER_LOG" 2>/dev/null | tr -d ' ')"
     info "server log: $SERVER_LOG (${sz:-0} bytes)"
 else
@@ -404,7 +427,11 @@ section "Template drift"
 # inlined by swiftc -O in a way `strings` misses). A feature the template has
 # but the installed app lacks ⇒ the app predates it ⇒ rebuild to refresh.
 WRAPPER_SRC="$SCRIPT_DIR/wrapper.swift"
-RUN_SRC="$SCRIPT_DIR/run-template.sh"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    RUN_SRC="$SCRIPT_DIR/run-template-url.sh"
+else
+    RUN_SRC="$SCRIPT_DIR/run-template.sh"
+fi
 INSTALLED_WRAPPER="${APP_UNDER_TEST:+$APP_UNDER_TEST/Contents/MacOS/wrapper}"
 INSTALLED_RUN="${APP_UNDER_TEST:+$APP_UNDER_TEST/Contents/MacOS/run}"
 drift_found=0
@@ -423,9 +450,18 @@ if [ -n "$APP_UNDER_TEST" ] && [ -f "$WRAPPER_SRC" ] && [ -f "${INSTALLED_WRAPPE
 fi
 
 if [ -n "$APP_UNDER_TEST" ] && [ -f "$RUN_SRC" ] && [ -f "${INSTALLED_RUN:-/nonexistent}" ] && grep -q "MacOS/wrapper" "$INSTALLED_RUN" 2>/dev/null; then
-    for probe in \
-        "Reattach to our own existing server|fast warm-relaunch (descendant-walk reattach)" \
-        "Two-stage readiness probe|the two-stage readiness probe"; do
+    if [ "$IS_URL_ONLY" = "1" ]; then
+        RUN_PROBES=(
+            "allow-external-hosts|hosted auth/API navigation stays in-window"
+            "APP_IT_SMOKE|URL-only smoke seam"
+        )
+    else
+        RUN_PROBES=(
+            "Reattach to our own existing server|fast warm-relaunch (descendant-walk reattach)"
+            "Two-stage readiness probe|the two-stage readiness probe"
+        )
+    fi
+    for probe in "${RUN_PROBES[@]}"; do
         marker="${probe%%|*}"; human="${probe##*|}"
         if grep -qF "$marker" "$RUN_SRC" 2>/dev/null && ! grep -qF "$marker" "$INSTALLED_RUN" 2>/dev/null; then
             warn "installed launcher script is missing $human — predates that template; rebuild"

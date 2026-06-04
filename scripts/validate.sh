@@ -26,6 +26,8 @@ require_file "plugins/app-it/skills/app-it/templates/desktop-build.sh"
 require_file "plugins/app-it/skills/app-it/templates/desktop-doctor.sh"
 require_file "plugins/app-it/skills/app-it/templates/desktop-icons-preview.sh"
 require_file "plugins/app-it/skills/app-it/templates/placeholder-icon-gen.sh"
+require_file "plugins/app-it/skills/app-it/templates/run-template-url.sh"
+require_file "plugins/app-it/skills/app-it/templates/run-template-url-chrome.sh"
 require_file "README.md"
 require_file "LICENSE"
 
