@@ -17,3 +17,11 @@ docs/desktop-launcher.app-it-report.md
 # Python bytecode (validate.sh syntax-checks static-server.py).
 __pycache__/
 *.pyc
+
+# Internal automation artifacts — campaign runbooks and per-run telemetry
+# (run state, step receipts, timelines, plugin-eval + coverage output). These
+# are local-only build-process scaffolding, not part of the published plugin.
+# The durable decisions live in docs/decisions/ (ADRs), which DO ship.
+campaigns/
+reports/
+plugins/*/coverage/
