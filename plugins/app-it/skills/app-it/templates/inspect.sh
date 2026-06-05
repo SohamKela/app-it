@@ -183,6 +183,37 @@ if has_next_signal:
 PY
 fi
 
+print_section "Claude Artifact signals"
+ARTIFACT_URL_PATTERN="https://claude\.ai/[^ )\"'>]+"
+ARTIFACT_API_PATTERN="window\.claude|window\.storage|claude\.complete|claude\.request"
+if command -v rg >/dev/null 2>&1; then
+    ARTIFACT_URLS="$(rg --no-heading -n -E "$ARTIFACT_URL_PATTERN" \
+        -g '*.md' -g '*.json' -g '*.html' -g '*.js' -g '*.jsx' -g '*.ts' -g '*.tsx' \
+        -g '!node_modules/**' -g '!desktop/**' -g '!assets/icons/**' -g '!.git/**' . 2>/dev/null | head -8 || true)"
+    ARTIFACT_API="$(rg --no-heading -n -E "$ARTIFACT_API_PATTERN" \
+        -g '*.html' -g '*.js' -g '*.jsx' -g '*.ts' -g '*.tsx' \
+        -g '!node_modules/**' -g '!desktop/**' -g '!assets/icons/**' -g '!.git/**' . 2>/dev/null | head -8 || true)"
+else
+    ARTIFACT_URLS="$(grep -RnE "$ARTIFACT_URL_PATTERN" . \
+        --include='*.md' --include='*.json' --include='*.html' --include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx' \
+        --exclude-dir=node_modules --exclude-dir=desktop --exclude-dir=.git 2>/dev/null | head -8 || true)"
+    ARTIFACT_API="$(grep -RnE "$ARTIFACT_API_PATTERN" . \
+        --include='*.html' --include='*.js' --include='*.jsx' --include='*.ts' --include='*.tsx' \
+        --exclude-dir=node_modules --exclude-dir=desktop --exclude-dir=.git 2>/dev/null | head -8 || true)"
+fi
+if [ -n "$ARTIFACT_URLS" ]; then
+    echo "$ARTIFACT_URLS" | sed 's/^/  possible hosted artifact URL: /'
+else
+    echo "  (no claude.ai URLs found in local project files)"
+fi
+if [ -n "$ARTIFACT_API" ]; then
+    echo "$ARTIFACT_API" | sed 's/^/  Claude Artifact runtime API usage: /'
+    echo "  -> If this source needs the logged-in Claude plan, package a published/shared Claude Artifact URL with external_url/artifact_url."
+    echo "     Do not shim Claude auth, cookies, or API keys into a local JSX bundle."
+else
+    echo "  (no window.claude/window.storage usage found in local source)"
+fi
+
 print_section "Framework port literals (would override launcher's PORT env)"
 if [ -f "$ROOT/vite.config.ts" ] || [ -f "$ROOT/vite.config.js" ] || [ -f "$ROOT/vite.config.mjs" ]; then
     for cfg in "$ROOT"/vite.config.{ts,js,mjs}; do

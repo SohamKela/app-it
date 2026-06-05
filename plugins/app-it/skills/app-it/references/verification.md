@@ -29,6 +29,14 @@ For fixed-port apps, verify that `ports.mode` is `fixed` and the recorded
 runtime port equals the configured preferred port. A busy preferred port should
 fail launch with an explanation; fallback is deliberately disabled.
 
+For Strategy E URL-only apps, rows 3-9 are `n/a - no local server`.
+Programmatic verification is: `APP_IT_SMOKE=1 desktop/<App>.app/Contents/MacOS/run`
+prints the configured URL, no `server.port` is written, `run.sh` contains the
+URL and `allow-external-hosts` in Swift mode, and rows 1-2 still pass. GUI
+verification is opening the installed app, signing into Claude if needed, and
+confirming the hosted artifact runs in-window. Do not `curl` private Artifact
+URLs as proof; auth-protected Artifacts may correctly redirect.
+
 | # | Check | Idiom |
 | ---: | --- | --- |
 | 1 | Build succeeded | `.app` exists; `file Contents/MacOS/run` reports Mach-O; `run.sh` executable; wrapper Mach-O; icon file valid |

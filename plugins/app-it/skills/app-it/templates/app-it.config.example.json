@@ -10,7 +10,8 @@
     "version": "Marketing version. Doesn't matter for unsigned use; pick anything semver-shaped.",
     "polyfill_path": "Optional absolute path to a JS polyfill file (FSA shim). Use @ROOT@ to reference the repo root: '@ROOT@/assets/<slug>-polyfill.js'. Empty string when no polyfill is needed.",
     "backend_port": "Optional. Set for A3.2 multi-server cohabiting apps. The backend service's preferred port. The launcher allocates a free port starting here for the backend, exports it as API_PORT to both processes.",
-    "backend_start_command": "Optional. The command to start the backend service. Must honor API_PORT env var. The frontend dev server (e.g. Vite) must proxy to http://localhost:$API_PORT (config edits required — see SKILL.md A3.2 section)."
+    "backend_start_command": "Optional. The command to start the backend service. Must honor API_PORT env var. The frontend dev server (e.g. Vite) must proxy to http://localhost:$API_PORT (config edits required — see SKILL.md A3.2 section).",
+    "external_url": "Optional. When set, desktop-build.sh creates a URL-only launcher and ignores port/start_command/backend fields. Use this for published/shared Claude Artifact URLs so each user signs into Claude with their own plan. Aliases accepted: artifact_url, url."
   },
   "apps": [
     {
@@ -23,7 +24,8 @@
       "version": "0.1.0",
       "polyfill_path": "",
       "backend_port": null,
-      "backend_start_command": null
+      "backend_start_command": null,
+      "external_url": ""
     }
   ]
 }

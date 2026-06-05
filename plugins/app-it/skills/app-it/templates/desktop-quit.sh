@@ -30,10 +30,12 @@ if [ -f "$CONFIG_FILE" ]; then
 import json, re, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
+def text(value):
+    return "" if value is None else str(value)
 for a in cfg.get("apps", []):
-    name = a.get("name", "")
+    name = a.get("name") or ""
     slug = a.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    print(f'{name}|{slug}|{a.get("port","")}|{a.get("backend_port") or ""}')
+    print(f'{name}|{slug}|{text(a.get("port",""))}|{text(a.get("backend_port") or "")}')
 PY
 )
 else
@@ -227,14 +229,15 @@ for entry in "${APPS[@]}"; do
 done
 
 # Native WebKit wrapper windows. Prefer the generated pid-file argument over
-# broad process names; it is unique to this app's launcher state.
+# broad process names; it is unique to this app's launcher state. URL-only
+# wrappers have no pid-file argument, so fall back to the app name in argv.
 for entry in "${APPS[@]}"; do
     IFS='|' read -r APP_NAME APP_SLUG _ _ <<<"$entry"
     STATE_DIR="$HOME/Library/Application Support/app-it/$APP_SLUG"
     PID_FILE="$STATE_DIR/server.pid"
     for p in $(pgrep -f "MacOS/wrapper " 2>/dev/null); do
         cmdline="$(ps -o command= -p "$p" 2>/dev/null || true)"
-        if echo "$cmdline" | grep -qF "$PID_FILE"; then
+        if echo "$cmdline" | grep -qF "$PID_FILE" || echo "$cmdline" | grep -qF "$APP_NAME"; then
             kill -TERM "$p" 2>/dev/null || true
             CLOSED_ANY=1
         fi

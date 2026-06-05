@@ -132,14 +132,18 @@ try:
     cfg = json.load(open(sys.argv[1]))
 except Exception as e:
     sys.stderr.write(f"could not parse app-it.config.json: {e}\n"); sys.exit(3)
+def text(value):
+    return "" if value is None else str(value)
 for a in cfg.get("apps", []):
-    name = a.get("name", "")
+    name = a.get("name") or ""
     slug = a.get("slug") or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    external_url = a.get("external_url") or a.get("artifact_url") or a.get("url") or ""
     fields = [
-        name, slug, str(a.get("port", "")), a.get("port_mode", "fallback"),
-        a.get("start_command", ""),
-        a.get("bundle_id", ""), a.get("version", "0.1.0"), a.get("polyfill_path", ""),
-        str(a.get("backend_port") or ""), a.get("backend_start_command") or "",
+        text(name), text(slug), text(a.get("port", "")), text(a.get("port_mode", "fallback")),
+        text(a.get("start_command", "")),
+        text(a.get("bundle_id", "")), text(a.get("version", "0.1.0")), text(a.get("polyfill_path", "")),
+        text(a.get("backend_port") or ""), text(a.get("backend_start_command") or ""),
+        text(external_url),
     ]
     print("|".join(f.replace("|", " ") for f in fields))
 PY
@@ -164,7 +168,9 @@ else
     SELECTED="${APPS[0]}"
 fi
 
-IFS='|' read -r APP_NAME APP_SLUG PORT PORT_MODE START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START <<<"$SELECTED"
+IFS='|' read -r APP_NAME APP_SLUG PORT PORT_MODE START_COMMAND BUNDLE_ID VERSION POLYFILL_PATH BACKEND_PORT BACKEND_START EXTERNAL_URL <<<"$SELECTED"
+IS_URL_ONLY=0
+[ -n "$EXTERNAL_URL" ] && IS_URL_ONLY=1
 
 # --- Paths (mirror run-template.sh / desktop-quit.sh conventions) ------------
 STATE_DIR="$HOME/Library/Application Support/app-it/$APP_SLUG"
@@ -292,6 +298,9 @@ if [ "$JSON_MODE" = "0" ]; then
     printf '  %sbundle id%s   %s\n' "$C_DIM" "$C_OFF" "${BUNDLE_ID:-(unset)}"
     printf '  %sport mode%s   %s\n' "$C_DIM" "$C_OFF" "$PORT_MODE"
     printf '  %sproject%s     %s\n' "$C_DIM" "$C_OFF" "$ROOT"
+    if [ "$IS_URL_ONLY" = "1" ]; then
+        printf '  %surl%s         %s\n' "$C_DIM" "$C_OFF" "$EXTERNAL_URL"
+    fi
     printf '  %ssubject%s     %s\n' "$C_DIM" "$C_OFF" "${APP_UNDER_TEST:-<no .app built yet>}"
 fi
 if [ "${#APPS[@]}" -gt 1 ] && [ -z "$SELECTOR" ]; then
@@ -306,7 +315,7 @@ ok "scripts/app-it.config.json present and parses"
 
 # Placeholder leakage — an unsubstituted __PLACEHOLDER__ means a broken build.
 leaked=""
-for v in "$APP_NAME" "$APP_SLUG" "$PORT" "$BUNDLE_ID" "$START_COMMAND"; do
+for v in "$APP_NAME" "$APP_SLUG" "$PORT" "$BUNDLE_ID" "$START_COMMAND" "$EXTERNAL_URL"; do
     case "$v" in *__*__*) leaked="$leaked $v" ;; esac
 done
 if [ -n "$leaked" ]; then
@@ -325,16 +334,27 @@ case "$bid_lc" in
     *)               warn "bundle id '$BUNDLE_ID' is not reverse-DNS shaped (expected something like com.user.$APP_SLUG)" ;;
 esac
 
-# Preferred port sanity.
-case "$PORT" in
-    ''|*[!0-9]*) warn "preferred port '$PORT' is not a plain number" ;;
-    *)           ok "preferred port :$PORT" ;;
-esac
-case "$PORT_MODE" in
-    fallback) ok "port mode: fallback (scan upward if the preferred port is busy)" ;;
-    fixed)    ok "port mode: fixed (requires exactly :$PORT; no collision fallback)" ;;
-    *)        fail "port_mode '$PORT_MODE' is invalid — expected fallback or fixed" ;;
-esac
+if [ "$IS_URL_ONLY" = "1" ]; then
+    case "$EXTERNAL_URL" in
+        http://*|https://*) ok "URL-only launcher: $EXTERNAL_URL" ;;
+        *)                 fail "URL-only launcher has a non-http(s) URL: $EXTERNAL_URL" ;;
+    esac
+    if [ -n "$PORT" ] || [ -n "$START_COMMAND" ] || [ -n "$BACKEND_PORT" ] || [ -n "$BACKEND_START" ]; then
+        warn "external URL is set alongside local server fields; URL-only mode wins and local server fields are ignored"
+    fi
+    info "no local dev server configured; this app loads the hosted URL directly"
+else
+    # Preferred port sanity.
+    case "$PORT" in
+        ''|*[!0-9]*) warn "preferred port '$PORT' is not a plain number" ;;
+        *)           ok "preferred port :$PORT" ;;
+    esac
+    case "$PORT_MODE" in
+        fallback) ok "port mode: fallback (scan upward if the preferred port is busy)" ;;
+        fixed)    ok "port mode: fixed (requires exactly :$PORT; no collision fallback)" ;;
+        *)        fail "port_mode '$PORT_MODE' is invalid — expected fallback or fixed" ;;
+    esac
+fi
 
 # =============================================================================
 section "Installed bundle"
@@ -437,133 +457,141 @@ fi
 section "Runtime — port, server, ownership"
 RUNTIME_PORT=""; [ -f "$PORT_FILE" ] && RUNTIME_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
 REC_PID="";      [ -f "$PID_FILE" ]  && REC_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-
-# Preferred vs runtime port.
-if [ -z "$RUNTIME_PORT" ]; then
-    if [ "$PORT_MODE" = "fixed" ]; then
-        info "frontend not currently running (no recorded runtime port). Fixed-port mode requires :$PORT."
-    else
-        info "frontend not currently running (no recorded runtime port). Preferred frontend is :$PORT."
-    fi
-elif [ "$RUNTIME_PORT" = "$PORT" ]; then
-    if [ "$PORT_MODE" = "fixed" ]; then
-        ok "fixed-port runtime is using required frontend port :$RUNTIME_PORT"
-    else
-        ok "frontend runtime port :$RUNTIME_PORT matches preferred frontend port"
-    fi
-else
-    if [ "$PORT_MODE" = "fixed" ]; then
-        fail "fixed-port mode is configured for :$PORT, but runtime state says :$RUNTIME_PORT — quit/rebuild/relaunch before trusting browser storage"
-    else
-        info "frontend running on runtime port :$RUNTIME_PORT, preferred frontend :$PORT — fell back (a sibling app or another process probably held :$PORT at launch)"
-    fi
-fi
-report_preferred_port_holder "frontend" "$PORT" "$RUNTIME_PORT" "$PORT_MODE"
-
-# Stale PID — low severity, because the launcher self-heals on the next click.
 PID_ALIVE=0
-if [ -n "$REC_PID" ]; then
-    if kill -0 "$REC_PID" 2>/dev/null; then
-        PID_ALIVE=1
-        ok "recorded supervisor PID $REC_PID is alive"
-    else
-        warn "stale server.pid: recorded PID $REC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
-    fi
-fi
-
-# Is the listener in this launcher's descendant tree?
-if [ -n "$RUNTIME_PORT" ]; then
-    LISTENERS="$(lsof -ti tcp:"$RUNTIME_PORT" 2>/dev/null || true)"
-    if [ -z "$LISTENERS" ]; then
-        if [ "$PID_ALIVE" = "1" ]; then
-            warn "supervisor PID $REC_PID is alive but nothing is listening on :$RUNTIME_PORT — server is probably still starting, or crashed after spawn (check the log)"
-        else
-            info "nothing is listening on :$RUNTIME_PORT (app is stopped)"
-        fi
-    elif [ "$PID_ALIVE" = "1" ]; then
-        TREE=" $(walk_descendants "$REC_PID") "
-        owned=0
-        for p in $LISTENERS; do case "$TREE" in *" $p "*) owned=1; break ;; esac; done
-        if [ "$owned" = "1" ]; then
-            ok "the process on :$RUNTIME_PORT belongs to this launcher (in PID $REC_PID's tree)"
-            code="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "http://localhost:$RUNTIME_PORT" 2>/dev/null || true)"
-            if [ -n "$code" ] && [ "$code" != "000" ]; then ok "server responds on http://localhost:$RUNTIME_PORT (HTTP $code)"
-            else warn "server is bound to :$RUNTIME_PORT but not answering HTTP yet — probably mid-startup"; fi
-        else
-            warn "a process holds :$RUNTIME_PORT but it is probably NOT this launcher's server (not in PID $REC_PID's tree) — could be a foreign app or a stale listener"
-        fi
-    else
-        warn "the recorded supervisor is gone yet :$RUNTIME_PORT is held — probably a stale or foreign process; the launcher will scan past it on next click"
-    fi
-fi
-
-# Backend check only when config declares one.
 BRUNTIME=""
 BREC_PID=""
 BPID_ALIVE=0
-if [ -n "$BACKEND_PORT" ]; then
-    BRUNTIME=""; [ -f "$BPORT_FILE" ] && BRUNTIME="$(cat "$BPORT_FILE" 2>/dev/null || true)"
-    BREC_PID=""; [ -f "$BPID_FILE" ] && BREC_PID="$(cat "$BPID_FILE" 2>/dev/null || true)"
-    if [ -n "$BREC_PID" ] && kill -0 "$BREC_PID" 2>/dev/null; then
-        BPID_ALIVE=1
-    fi
 
-    if [ -z "$BRUNTIME" ]; then
-        if [ "$BPID_ALIVE" = "1" ]; then
-            warn "backend supervisor PID $BREC_PID is alive but no backend.port is recorded — backend may still be starting, or state is incomplete"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    ok "URL-only app; no local daemon, runtime port, or server ownership to check"
+else
+    # Preferred vs runtime port.
+    if [ -z "$RUNTIME_PORT" ]; then
+        if [ "$PORT_MODE" = "fixed" ]; then
+            info "frontend not currently running (no recorded runtime port). Fixed-port mode requires :$PORT."
         else
-            info "multi-server backend not currently running (no recorded runtime port). Preferred backend is :$BACKEND_PORT."
+            info "frontend not currently running (no recorded runtime port). Preferred frontend is :$PORT."
+        fi
+    elif [ "$RUNTIME_PORT" = "$PORT" ]; then
+        if [ "$PORT_MODE" = "fixed" ]; then
+            ok "fixed-port runtime is using required frontend port :$RUNTIME_PORT"
+        else
+            ok "frontend runtime port :$RUNTIME_PORT matches preferred frontend port"
         fi
     else
-        if [ "$BRUNTIME" = "$BACKEND_PORT" ]; then
-            ok "backend runtime port :$BRUNTIME matches preferred backend port"
+        if [ "$PORT_MODE" = "fixed" ]; then
+            fail "fixed-port mode is configured for :$PORT, but runtime state says :$RUNTIME_PORT — quit/rebuild/relaunch before trusting browser storage"
         else
-            info "backend running on runtime port :$BRUNTIME, preferred backend :$BACKEND_PORT — fell back"
-        fi
-
-        if [ -n "$BREC_PID" ]; then
-            if [ "$BPID_ALIVE" = "1" ]; then
-                ok "recorded backend supervisor PID $BREC_PID is alive"
-            else
-                warn "stale backend.pid: recorded PID $BREC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
-            fi
-        fi
-
-        BLISTENERS="$(lsof -ti tcp:"$BRUNTIME" 2>/dev/null || true)"
-        if [ -z "$BLISTENERS" ]; then
-            if [ "$BPID_ALIVE" = "1" ]; then
-                warn "backend supervisor PID $BREC_PID is alive but nothing is listening on :$BRUNTIME — backend is probably still starting, or crashed after spawn (check backend.log)"
-            else
-                warn "backend absent: runtime state says :$BRUNTIME, but no backend listener is present"
-            fi
-        elif [ "$BPID_ALIVE" = "1" ]; then
-            BTREE=" $(walk_descendants "$BREC_PID") "
-            bowned=0
-            for p in $BLISTENERS; do case "$BTREE" in *" $p "*) bowned=1; break ;; esac; done
-            if [ "$bowned" = "1" ]; then
-                ok "backend runtime port :$BRUNTIME is listening (preferred :$BACKEND_PORT) and belongs to this launcher"
-            else
-                warn "backend runtime port :$BRUNTIME is held but it is probably NOT this launcher's backend (not in PID $BREC_PID's tree) — could be foreign or stale"
-            fi
-        else
-            warn "backend runtime port :$BRUNTIME is held but the recorded backend PID is dead or missing — probably foreign or stale"
+            info "frontend running on runtime port :$RUNTIME_PORT, preferred frontend :$PORT — fell back (a sibling app or another process probably held :$PORT at launch)"
         fi
     fi
-    report_preferred_port_holder "backend" "$BACKEND_PORT" "$BRUNTIME" "fallback"
+    report_preferred_port_holder "frontend" "$PORT" "$RUNTIME_PORT" "$PORT_MODE"
+
+    # Stale PID — low severity, because the launcher self-heals on the next click.
+    if [ -n "$REC_PID" ]; then
+        if kill -0 "$REC_PID" 2>/dev/null; then
+            PID_ALIVE=1
+            ok "recorded supervisor PID $REC_PID is alive"
+        else
+            warn "stale server.pid: recorded PID $REC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
+        fi
+    fi
+
+    # Is the listener in this launcher's descendant tree?
+    if [ -n "$RUNTIME_PORT" ]; then
+        LISTENERS="$(lsof -ti tcp:"$RUNTIME_PORT" 2>/dev/null || true)"
+        if [ -z "$LISTENERS" ]; then
+            if [ "$PID_ALIVE" = "1" ]; then
+                warn "supervisor PID $REC_PID is alive but nothing is listening on :$RUNTIME_PORT — server is probably still starting, or crashed after spawn (check the log)"
+            else
+                info "nothing is listening on :$RUNTIME_PORT (app is stopped)"
+            fi
+        elif [ "$PID_ALIVE" = "1" ]; then
+            TREE=" $(walk_descendants "$REC_PID") "
+            owned=0
+            for p in $LISTENERS; do case "$TREE" in *" $p "*) owned=1; break ;; esac; done
+            if [ "$owned" = "1" ]; then
+                ok "the process on :$RUNTIME_PORT belongs to this launcher (in PID $REC_PID's tree)"
+                code="$(curl -sS -o /dev/null --max-time 1 -w "%{http_code}" "http://localhost:$RUNTIME_PORT" 2>/dev/null || true)"
+                if [ -n "$code" ] && [ "$code" != "000" ]; then ok "server responds on http://localhost:$RUNTIME_PORT (HTTP $code)"
+                else warn "server is bound to :$RUNTIME_PORT but not answering HTTP yet — probably mid-startup"; fi
+            else
+                warn "a process holds :$RUNTIME_PORT but it is probably NOT this launcher's server (not in PID $REC_PID's tree) — could be a foreign app or a stale listener"
+            fi
+        else
+            warn "the recorded supervisor is gone yet :$RUNTIME_PORT is held — probably a stale or foreign process; the launcher will scan past it on next click"
+        fi
+    fi
+
+    # Backend check only when config declares one.
+    if [ -n "$BACKEND_PORT" ]; then
+        BRUNTIME=""; [ -f "$BPORT_FILE" ] && BRUNTIME="$(cat "$BPORT_FILE" 2>/dev/null || true)"
+        BREC_PID=""; [ -f "$BPID_FILE" ] && BREC_PID="$(cat "$BPID_FILE" 2>/dev/null || true)"
+        if [ -n "$BREC_PID" ] && kill -0 "$BREC_PID" 2>/dev/null; then
+            BPID_ALIVE=1
+        fi
+
+        if [ -z "$BRUNTIME" ]; then
+            if [ "$BPID_ALIVE" = "1" ]; then
+                warn "backend supervisor PID $BREC_PID is alive but no backend.port is recorded — backend may still be starting, or state is incomplete"
+            else
+                info "multi-server backend not currently running (no recorded runtime port). Preferred backend is :$BACKEND_PORT."
+            fi
+        else
+            if [ "$BRUNTIME" = "$BACKEND_PORT" ]; then
+                ok "backend runtime port :$BRUNTIME matches preferred backend port"
+            else
+                info "backend running on runtime port :$BRUNTIME, preferred backend :$BACKEND_PORT — fell back"
+            fi
+
+            if [ -n "$BREC_PID" ]; then
+                if [ "$BPID_ALIVE" = "1" ]; then
+                    ok "recorded backend supervisor PID $BREC_PID is alive"
+                else
+                    warn "stale backend.pid: recorded PID $BREC_PID is dead. Low severity — the launcher clears this on next click. Clear now with --fix-safe."
+                fi
+            fi
+
+            BLISTENERS="$(lsof -ti tcp:"$BRUNTIME" 2>/dev/null || true)"
+            if [ -z "$BLISTENERS" ]; then
+                if [ "$BPID_ALIVE" = "1" ]; then
+                    warn "backend supervisor PID $BREC_PID is alive but nothing is listening on :$BRUNTIME — backend is probably still starting, or crashed after spawn (check backend.log)"
+                else
+                    warn "backend absent: runtime state says :$BRUNTIME, but no backend listener is present"
+                fi
+            elif [ "$BPID_ALIVE" = "1" ]; then
+                BTREE=" $(walk_descendants "$BREC_PID") "
+                bowned=0
+                for p in $BLISTENERS; do case "$BTREE" in *" $p "*) bowned=1; break ;; esac; done
+                if [ "$bowned" = "1" ]; then
+                    ok "backend runtime port :$BRUNTIME is listening (preferred :$BACKEND_PORT) and belongs to this launcher"
+                else
+                    warn "backend runtime port :$BRUNTIME is held but it is probably NOT this launcher's backend (not in PID $BREC_PID's tree) — could be foreign or stale"
+                fi
+            else
+                warn "backend runtime port :$BRUNTIME is held but the recorded backend PID is dead or missing — probably foreign or stale"
+            fi
+        fi
+        report_preferred_port_holder "backend" "$BACKEND_PORT" "$BRUNTIME" "fallback"
+    fi
 fi
 
 section "Live windows — diagnostic only"
 report_live_app_windows
 
 # Catch "works in terminal, dead from Dock" by using the launcher's PATH.
-CMD="$START_COMMAND"
-case "$CMD" in cd\ *\ \&\&\ *) CMD="${CMD#* && }" ;; esac
-FIRST_BIN="$(printf '%s' "$CMD" | awk '{print $1}')"
-if [ -n "$FIRST_BIN" ]; then
-    if PATH="$LAUNCHER_PATH" command -v "$FIRST_BIN" >/dev/null 2>&1; then
-        ok "start command's binary '$FIRST_BIN' resolves on the launcher's PATH"
-    else
-        warn "start command's binary '$FIRST_BIN' is NOT on the launcher's PATH — the app would fail from a Dock click even if it works in your terminal"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    info "URL-only launcher: no start command binary is expected"
+else
+    CMD="$START_COMMAND"
+    case "$CMD" in cd\ *\ \&\&\ *) CMD="${CMD#* && }" ;; esac
+    FIRST_BIN="$(printf '%s' "$CMD" | awk '{print $1}')"
+    if [ -n "$FIRST_BIN" ]; then
+        if PATH="$LAUNCHER_PATH" command -v "$FIRST_BIN" >/dev/null 2>&1; then
+            ok "start command's binary '$FIRST_BIN' resolves on the launcher's PATH"
+        else
+            warn "start command's binary '$FIRST_BIN' is NOT on the launcher's PATH — the app would fail from a Dock click even if it works in your terminal"
+        fi
     fi
 fi
 
@@ -575,7 +603,9 @@ if [ -f "$RUNTIME_SUMMARY_FILE" ]; then
 else
     info "no runtime summary yet: $RUNTIME_SUMMARY_FILE"
 fi
-if [ -f "$SERVER_LOG" ]; then
+if [ "$IS_URL_ONLY" = "1" ]; then
+    info "URL-only launcher: no server log is expected"
+elif [ -f "$SERVER_LOG" ]; then
     sz="$(wc -c < "$SERVER_LOG" 2>/dev/null | tr -d ' ')"
     info "server log: $SERVER_LOG (${sz:-0} bytes)"
 else
@@ -597,7 +627,11 @@ section "Template drift"
 # No version stamp exists; feature-probe installed artifacts against templates.
 # Keep `grep -qboa` for wrapper markers because older builds hid them from strings.
 WRAPPER_SRC="$SCRIPT_DIR/wrapper.swift"
-RUN_SRC="$SCRIPT_DIR/run-template.sh"
+if [ "$IS_URL_ONLY" = "1" ]; then
+    RUN_SRC="$SCRIPT_DIR/run-template-url.sh"
+else
+    RUN_SRC="$SCRIPT_DIR/run-template.sh"
+fi
 INSTALLED_WRAPPER="${APP_UNDER_TEST:+$APP_UNDER_TEST/Contents/MacOS/wrapper}"
 INSTALLED_RUN="${APP_UNDER_TEST:+$APP_UNDER_TEST/Contents/MacOS/run}"
 INSTALLED_RUN_SH="${APP_UNDER_TEST:+$APP_UNDER_TEST/Contents/MacOS/run.sh}"
@@ -619,9 +653,18 @@ if [ -n "$APP_UNDER_TEST" ] && [ -f "$WRAPPER_SRC" ] && [ -f "${INSTALLED_WRAPPE
 fi
 
 if [ -n "$APP_UNDER_TEST" ] && [ -f "$RUN_SRC" ] && [ -f "${INSTALLED_LAUNCHER:-/nonexistent}" ] && grep -q "MacOS/wrapper" "$INSTALLED_LAUNCHER" 2>/dev/null; then
-    for probe in \
-        "Reattach to our own existing server|fast warm-relaunch (descendant-walk reattach)" \
-        "Two-stage readiness probe|the two-stage readiness probe"; do
+    if [ "$IS_URL_ONLY" = "1" ]; then
+        RUN_PROBES=(
+            "allow-external-hosts|hosted auth/API navigation stays in-window"
+            "APP_IT_SMOKE|URL-only smoke seam"
+        )
+    else
+        RUN_PROBES=(
+            "Reattach to our own existing server|fast warm-relaunch (descendant-walk reattach)"
+            "Two-stage readiness probe|the two-stage readiness probe"
+        )
+    fi
+    for probe in "${RUN_PROBES[@]}"; do
         marker="${probe%%|*}"; human="${probe##*|}"
         if grep -qF "$marker" "$RUN_SRC" 2>/dev/null && ! grep -qF "$marker" "$INSTALLED_LAUNCHER" 2>/dev/null; then
             warn "installed launcher script is missing $human — predates that template; rebuild"
@@ -731,6 +774,8 @@ if [ "$JSON_MODE" = "1" ]; then
     DOCTOR_BUNDLE_ID="$BUNDLE_ID" \
     DOCTOR_VERSION="$VERSION" \
     DOCTOR_PROJECT_ROOT="$ROOT" \
+    DOCTOR_EXTERNAL_URL="$EXTERNAL_URL" \
+    DOCTOR_IS_URL_ONLY="$IS_URL_ONLY" \
     DOCTOR_SUBJECT="$APP_UNDER_TEST" \
     DOCTOR_SUBJECT_LOCATION="$APP_LOC" \
     DOCTOR_INSTALL_APP="$INSTALL_APP" \
@@ -780,6 +825,8 @@ payload = {
         "slug": os.environ["DOCTOR_APP_SLUG"],
         "bundle_id": empty_to_none(os.environ["DOCTOR_BUNDLE_ID"]),
         "version": empty_to_none(os.environ["DOCTOR_VERSION"]),
+        "url_only": os.environ["DOCTOR_IS_URL_ONLY"] == "1",
+        "external_url": empty_to_none(os.environ["DOCTOR_EXTERNAL_URL"]),
     },
     "project": {
         "root": os.environ["DOCTOR_PROJECT_ROOT"],

@@ -11,6 +11,8 @@ Copy from `templates/`:
 - `run-template.sh`
 - `run-template-chrome.sh`
 - `run-template-multiserver.sh`
+- `run-template-url.sh`
+- `run-template-url-chrome.sh`
 - `native-run-stub.c`
 - `desktop-build.sh`
 - `desktop-icons.sh`
@@ -59,13 +61,16 @@ Use `scripts/app-it.config.json`:
       "start_command": "npm run dev -- --host 127.0.0.1 --port $PORT --strictPort",
       "bundle_id": "com.user.my-app",
       "version": "0.1.0",
-      "polyfill_path": ""
+      "polyfill_path": "",
+      "external_url": ""
     }
   ]
 }
 ```
 
-For A3, add `backend_port` and `backend_start_command`.
+For A3, add `backend_port` and `backend_start_command`. For Strategy E
+URL-only apps, set `external_url` (or alias `artifact_url` / `url`) and leave
+local-server fields empty or `null`; URL-only mode wins if both are present.
 
 Use `port_mode: "fixed"` only when the frontend origin must stay exact. The
 default `fallback` mode is friendlier for sibling local apps because it scans
@@ -81,6 +86,7 @@ Build-time substitution writes:
 - `__PORT__`
 - `__PORT_MODE__`
 - `__START_COMMAND__`
+- `__APP_URL__`
 - `__BUNDLE_ID__`
 - `__VERSION__`
 - `__POLYFILL_PATH__`

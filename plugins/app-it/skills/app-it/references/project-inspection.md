@@ -11,6 +11,7 @@ read-only and prints the signals that decide the packaging route.
 - `dev` and `start` script inventory, especially scripts with hardcoded
   `-p`/`--port` values or multi-process orchestrators.
 - Framework port literals in config files.
+- Claude Artifact URLs and hosted Artifact runtime API usage.
 - Two-stage File System Access usage.
 - Existing App It sibling apps and current port listeners.
 - Toolchain availability, especially `swiftc`.
@@ -35,6 +36,10 @@ persistent absolute path.
 - Existing desktop: `electron`, `electron-builder`, `src-tauri/`, `nw.js`.
 - PWA: `manifest.json` and service worker. Still build a Strategy A `.app` and
   mention PWA install as optional.
+- Published/shared Claude Artifact URL: choose Strategy E URL-only.
+- Raw Claude Artifact source using `window.claude`, `window.storage`, MCP
+  prompts, or Claude-provided auth: block local credential shims and ask for a
+  published/shared Artifact URL.
 
 Ignore stale docs when they disagree with the files that actually run.
 

@@ -3,17 +3,21 @@
 Choose exactly one strategy per user-facing app.
 
 ```text
-Existing Electron/Tauri/NW.js config?
-  yes -> Strategy B
-  no  -> native desktop requirements beyond web shell?
-           yes -> Strategy D
-           no  -> FSA real-I/O or Chromium-only API?
-                    yes -> A1 Chrome fallback
-                    no  -> static built bundle, no server?
-                             yes -> A2
-                             no  -> cohabiting frontend + backend?
-                                      yes -> A3
-                                      no  -> A1 native WebKit
+Published/shared Claude Artifact URL?
+  yes -> Strategy E
+  no  -> raw Artifact source uses window.claude/window.storage/MCP/auth?
+           yes -> blocked until user provides/publishes a Claude Artifact URL
+           no  -> Existing Electron/Tauri/NW.js config?
+                    yes -> Strategy B
+                    no  -> native desktop requirements beyond web shell?
+                             yes -> Strategy D
+                             no  -> FSA real-I/O or Chromium-only API?
+                                      yes -> A1 Chrome fallback
+                                      no  -> static built bundle, no server?
+                                               yes -> A2
+                                               no  -> cohabiting frontend + backend?
+                                                        yes -> A3
+                                                        no  -> A1 native WebKit
 ```
 
 ## A1 Native WebKit - Default
@@ -83,6 +87,25 @@ proxy targets read `API_PORT`, and backend entrypoints read `API_PORT` before
 
 Only for scripts with no UI. It spawns Terminal and should be flagged clearly in
 the report. Do not choose this for web apps.
+
+## Strategy E URL-Only Hosted App
+
+Use when the app already lives at a hosted URL and the host must own auth and
+runtime behavior. The primary case is a published/shared Claude Artifact:
+Claude provides the artifact sandbox, AI bridge, storage, login, and plan usage.
+App It wraps the URL; it does not recreate Claude's runtime locally.
+
+Set `external_url`, `artifact_url`, or `url` in `scripts/app-it.config.json`.
+The generated launcher starts no local daemon, writes no `server.port`, and
+passes `allow-external-hosts` to the Swift wrapper so Claude auth redirects,
+hosted iframe traffic, and API bridge navigation remain in-window.
+
+Raw JSX/TSX exported from a Claude Artifact is only normal local web app source
+when it does not depend on Claude's hosted runtime APIs. If it calls
+`window.claude`, `window.storage`, MCP prompts, or Claude-provided auth, do not
+shim local credentials, cookies, sessions, or API keys. Publish/share the
+artifact in Claude and package that hosted URL so each recipient signs in with
+their own Claude account and plan.
 
 ## Strategy B Existing Desktop Config
 

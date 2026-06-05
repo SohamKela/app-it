@@ -414,6 +414,23 @@ build
 assert_bundle "Next Basic" next-basic com.user.next-basic swift
 
 # =============================================================================
+section "claude-artifact-url — URL-only hosted Artifact bundle"
+setup_proj claude-artifact-url app-it claude-artifact
+build
+assert_bundle "Claude Artifact" claude-artifact com.user.claude-artifact swift
+RUN_SCRIPT="$(cat "$PROJ/desktop/Claude Artifact.app/Contents/MacOS/run.sh")"
+has "URL-only template selected" "$RUN_SCRIPT" "claude.ai/public/artifacts"
+has "URL-only wrapper keeps hosted navigation in-window" "$RUN_SCRIPT" "allow-external-hosts"
+if run_capped 10 "$PROJ/url-smoke.log" env APP_IT_SMOKE=1 "$PROJ/desktop/Claude Artifact.app/Contents/MacOS/run"; then
+    ok "URL-only launcher smoke run succeeds without starting a server"
+else
+    bad "URL-only launcher smoke run failed"; sed 's/^/       /' "$PROJ/url-smoke.log"
+fi
+no_path "URL-only launcher records no server.port" "$(state_dir claude-artifact)/server.port"
+APP_IT_PROJECT_ROOT="$PROJ" bash "$PROJ/scripts/desktop-doctor.sh" claude-artifact >"$PROJ/doctor-artifact.log" 2>&1 || true
+has "desktop-doctor reports URL-only mode" "$(cat "$PROJ/doctor-artifact.log")" "URL-only app; no local daemon"
+
+# =============================================================================
 section "next-hardcoded-port — inspect recommends direct Next binary"
 setup_proj next-hardcoded-port app-it next-hardcoded-port
 INSPECT="$(APP_IT_PROJECT_ROOT="$PROJ" bash "$PROJ/scripts/inspect.sh" 2>&1 || true)"

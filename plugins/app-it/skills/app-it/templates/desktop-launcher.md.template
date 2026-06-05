@@ -5,7 +5,7 @@ Click an icon in `~/Applications/App It/` (or its Dock Stack) to launch.
 ## First launch
 
 1. Right-click the app icon and choose **Open**, then click **Open** in the dialog. macOS remembers and skips this on subsequent launches (Gatekeeper, unsigned bundle).
-2. The first cold start takes 5–15 s while the dev server compiles.
+2. The first cold start takes 5–15 s while the dev server compiles. URL-only apps (for example, Claude Artifact wrappers) do not compile locally; first launch is WebKit startup plus sign-in/network time.
 3. If a "couldn't be opened" alert appears citing the dev server, open `~/Library/Logs/app-it/<slug>/server.log`. The alert quotes the tail; the full log usually shows the cause.
 
 ## Apps
@@ -24,6 +24,7 @@ The launcher is **persistent** — designed for daily use, not single-shot demos
 - **Cmd+Q (or right-click → Quit in the Dock) DOES kill the server.** Full-shutdown path — use when you actually want everything to stop.
 - **Re-clicking the icon while the window is open** brings the existing window forward. No second window.
 - **Sibling appified apps coexist by default.** With `port_mode: "fallback"`, if another `.app` already grabbed the configured port, this launcher scans upward and picks a free port. With `port_mode: "fixed"`, the configured port is required and a busy port fails clearly so browser storage stays on one origin. The runtime port is recorded at `~/Library/Application Support/app-it/<slug>/server.port`.
+- **Claude Artifact wrappers.** Sharing the `.app` shares only the hosted URL wrapper, not Claude credentials. Each recipient signs into Claude and uses their own plan.
 
 To stop the persistent dev servers from the terminal:
 

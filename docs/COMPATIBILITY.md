@@ -9,9 +9,22 @@
 | OS | macOS |
 | Primary shell | Swift `WKWebView` wrapper |
 | Fallback shell | Chrome `--app` mode |
-| Common targets | Vite + React, SvelteKit, Astro, Next.js, static sites, local multi-server apps |
+| Common targets | Vite + React, SvelteKit, Astro, Next.js, static sites, local multi-server apps, published Claude Artifact URLs |
 | Install destination | `~/Applications/App It/` by default |
 | Signing | Ad-hoc local code signing only |
+
+## Claude Artifact URL wrappers
+
+`app-it` can build a URL-only `.app` around a published/shared Claude Artifact
+link. That path intentionally keeps Claude in charge of authentication and
+artifact runtime APIs: the bundle loads the hosted `claude.ai` URL, the user
+signs into Claude inside the app window, and usage belongs to that user's plan.
+
+Raw JSX/TSX exported from an artifact is only a normal local web app source
+file. If it calls Claude's hosted artifact APIs (`window.claude`,
+`window.storage`, MCP prompts, or Claude-provided auth), do not shim credentials,
+cookies, or API keys into the local bundle. Publish/share the artifact in Claude
+and set `external_url` or `artifact_url` in `scripts/app-it.config.json`.
 
 ## Companion · `app-it-static`
 
@@ -51,6 +64,7 @@ The author runs only macOS and will not dogfood the Windows build, so it ships a
 - Notarized distribution to other users.
 - Auto-update.
 - Installer generation.
+- Local redistribution of Claude Artifact auth, session cookies, or API keys.
 - Production Electron or Tauri migrations.
 
 ## Why Windows Should Be Separate

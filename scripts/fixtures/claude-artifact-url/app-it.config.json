@@ -1,0 +1,17 @@
+{
+  "apps": [
+    {
+      "name": "Claude Artifact",
+      "slug": "claude-artifact",
+      "port": null,
+      "port_mode": "fallback",
+      "start_command": "",
+      "bundle_id": "com.user.claude-artifact",
+      "version": "0.1.0",
+      "polyfill_path": "",
+      "backend_port": null,
+      "backend_start_command": null,
+      "artifact_url": "https://claude.ai/public/artifacts/00000000-0000-4000-8000-000000000000"
+    }
+  ]
+}
